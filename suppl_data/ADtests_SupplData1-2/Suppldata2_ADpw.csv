@@ -1,4 +1,4 @@
-Suppl Data 1: The results of the anderson-darling pairwise assessment of pathway trees under category distributions indicates significant difference in the relative Robinson-Foulds (RF) distance in taurine/cysteine metabolism category pathway genes versus both bile acid metabolism and fatty acid/cholesterol metabolism gene trees from their respective category-associated pathways.
+Supplementary Data 2: The results of the anderson-darling pairwise assessment of pathway trees under category distributions indicates significant difference in the relative Robinson-Foulds (RF) distance in taurine/cysteine metabolism category pathway genes versus both bile acid metabolism and fatty acid/cholesterol metabolism gene trees from their respective category-associated pathways.
 
 "category_1","category_2","n_1","n_2","median_effect_1","median_effect_2","median_rf_1","median_rf_2","p_ad_effect","p_ad_rf","fdr_ad_effect","fdr_ad_rf"
 "Bile acid biosynthesis & metabolism","Taurine and cysteine metabolism",31,28,118.493858,267.865369,0.0363636363636364,0.0699186991869919,0.7644,0.013053,0.903855555555556,0.088775

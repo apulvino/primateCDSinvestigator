@@ -1,4 +1,4 @@
-Suppl Data 1: The results of the anderson-darling one-vs-all assessment of pathway trees under category distributions indicates significant difference in the relative Robinson-Foulds (RF) distance in taurine/cysteine metabolism category pathway genes than gene trees from all other category-associated pathways.
+Supplementary Data 1: The results of the anderson-darling one-vs-all assessment of pathway trees under category distributions indicates significant difference in the relative Robinson-Foulds (RF) distance in taurine/cysteine metabolism category pathway genes than gene trees from all other category-associated pathways.
 
 "functional_category","n_pathway","n_other_pathways","median_effect_pathway","median_effect_other_pathways","median_rf_pathway","median_rf_other_pathways","p_ad_effect","p_ad_rf","fdr_ad_effect","fdr_ad_rf"
 "Taurine and cysteine metabolism",28,114,267.865369,58.1448030000006,0.0699186991869919,0.0434782608695652,0.9764,0.011641,0.9764,0.058205
