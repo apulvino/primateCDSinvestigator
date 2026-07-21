@@ -1,0 +1,4362 @@
+---
+title: "2One2many"
+author: "Will Quinn"
+date: "2026-05-19"
+output: html_document
+---
+
+## Load Packages 
+```{r }
+
+#https://hyphy.org/resources/json-fields.pdf
+library(ape)
+library(ggtree)
+library(tidyverse)
+library(tidytext)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(scales)
+library(glue)
+library(tidytext)
+library(ggtext)
+library(KEGGREST)
+#BiocManager::install("sangerseqR")
+#devtools::install_version("bold", version="0.9.0", dependencies = FALSE)
+#install.packages('datelife', repos = c('https://phylotastic.r-universe.dev', 'https://cloud.r-project.org'))
+library(datelife)
+library(cowplot)
+library(tidyr)
+library(ggplot2)
+library(viridis)
+library(ggrepel)
+library(patchwork)
+library(forcats)
+library(scales)
+library(tidyverse)
+#install.packages("eulerr")
+library(eulerr) 
+#install.packages("UpSetR")
+library(UpSetR)    
+library(phylocomr)
+# install.packages("rotl")
+# install.packages("ape") 
+# install.packages("devtools")
+# install.packages("stringr")
+# install.packages("datelife")
+library(rotl)
+library(ape)
+library(devtools)
+library(rlang)
+library(ggpubr)
+#install.packages("ggridges")
+library(ggridges)
+library(gridExtra)
+library(gridExtra)
+library(grid)
+
+
+```
+
+
+
+
+
+
+
+#Ortholog detect
+```{r}
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(readr)
+library(furrr)
+# install.packages("RMariaDB")
+# install.packages("DBI")
+#install.packages("RMySQL")
+library(RMySQL)
+library(DBI)
+library(RMariaDB)
+
+output_dir <- "OrthologTester"
+dir.create(output_dir, showWarnings = FALSE)
+
+#########ONE2ONE ORTHOLOG FILTER #######
+manifest <- read_csv("manifest.csv")
+genes <- unique(na.omit(manifest$gene))
+con <- dbConnect(MySQL(), host = "ensembldb.ensembl.org", port = 3306,
+                 user = "anonymous", dbname = "ensembl_compara_113")
+species_set <- c("pan_troglodytes","pan_paniscus","gorilla_gorilla","pongo_abelii",
+  "nomascus_leucogenys","chlorocebus_sabaeus","macaca_mulatta","macaca_fascicularis",
+  "macaca_nemestrina","papio_anubis","callithrix_jacchus","saimiri_boliviensis_boliviensis",
+  "aotus_nancymaae","microcebus_murinus","colobus_angolensis_palliatus","cercocebus_atys",
+  "theropithecus_gelada","prolemur_simus","carlito_syrichta","propithecus_coquereli")
+q <- sprintf("SELECT gm1.display_label AS gene, gdb2.name AS species, h.description AS homology_type
+  FROM homology h JOIN homology_member hm1 ON h.homology_id=hm1.homology_id
+  JOIN homology_member hm2 ON h.homology_id=hm2.homology_id AND hm1.gene_member_id<>hm2.gene_member_id
+  JOIN gene_member gm1 ON hm1.gene_member_id=gm1.gene_member_id
+  JOIN gene_member gm2 ON hm2.gene_member_id=gm2.gene_member_id
+  JOIN genome_db gdb1 ON gm1.genome_db_id=gdb1.genome_db_id
+  JOIN genome_db gdb2 ON gm2.genome_db_id=gdb2.genome_db_id
+  WHERE gdb1.name='homo_sapiens' AND gdb2.name IN ('%s') AND gm1.display_label IN ('%s')
+  AND h.description='ortholog_one2one'",
+  paste(species_set, collapse="','"), paste(genes, collapse="','"))
+tags <- dbGetQuery(con, q) %>% distinct()
+dbDisconnect(con)
+
+MIN_ONE2ONE_SPECIES <- 15
+
+tagged <- manifest %>% left_join(tags, by = c("gene", "species")) %>%
+  filter(species != "homo_sapiens" & status == "alternative")
+tagged2 <- manifest %>% left_join(tags, by = c("gene", "species")) %>%
+  filter(species != "homo_sapiens" & status == "canonical")
+exclusively_one2one_genes <- tagged %>%
+  group_by(gene) %>%
+  filter( n_distinct(species[homology_type == "ortholog_one2one" & !is.na(homology_type)]) >= MIN_ONE2ONE_SPECIES ) %>%
+  ungroup() %>%
+  pull(gene) %>%
+  unique() %>%
+  sort()
+exclusively_one2one_genesV2 <- tagged2 %>%
+  group_by(gene) %>%
+  filter( n_distinct(species[homology_type == "ortholog_one2one" & !is.na(homology_type)]) >= MIN_ONE2ONE_SPECIES ) %>%
+  ungroup() %>%
+  pull(gene) %>%
+  unique() %>%
+  sort()
+one2one_filter <- c(exclusively_one2one_genesV2,exclusively_one2one_genes) %>% sort() %>% unique()
+##############################################
+  
+length(one2one_filter)
+
+filter_one2manyID <- function(df, gene_col) {
+  df %>%
+    mutate(.gene_tmp = toupper(.data[[gene_col]])) %>%
+    filter(.gene_tmp %in% one2one_filter) %>%
+    select(-.gene_tmp)
+}
+
+
+demons <- c(
+  "ABAT", "ACOT2", "ADH1A", "ADH1B", "ADH1C", "ADH6", "APOA2", "ATP1A4", "CETP",
+  "CH25H", "CTH", "CYP2A6", "CYP2A7", "CYP2C8", "CYP2C9", "CYP3A4", "CYP3A7",
+  "DHFR2", "DHRS4L2", "GPAT2", "LDHA", "LDHAL6B", "LPA", "PGAM4", "PLA2G2C",
+  "PLA2G4C", "PRKACG", "SLCO1B1", "UGT1A10", "UGT1A3", "UGT1A5", "UGT1A6",
+  "UGT1A7", "UGT1A8", "UGT1A9", "UGT2A2", "UGT2B10", "UGT2B11", "UGT2B15",
+  "UGT2B28", "UGT2B4", "UGT2B7"
+)
+
+exorcise <- function(df, gene_col) {
+  df %>%
+    mutate(.gene_tmp = toupper(.data[[gene_col]])) %>%
+    filter(!.gene_tmp %in% demons) %>%
+    select(-.gene_tmp)
+}
+ 
+
+```
+
+
+
+# original df 2_TreeMetrics_HyPhy_Fig3
+
+
+## Load Packages 
+```{r }
+
+#https://hyphy.org/resources/json-fields.pdf
+library(ape)
+library(ggtree)
+library(tidyverse)
+library(tidytext)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(scales)
+library(glue)
+library(tidytext)
+library(ggtext)
+library(KEGGREST)
+#BiocManager::install("sangerseqR")
+#devtools::install_version("bold", version="0.9.0", dependencies = FALSE)
+#install.packages('datelife', repos = c('https://phylotastic.r-universe.dev', 'https://cloud.r-project.org'))
+library(datelife)
+library(cowplot)
+library(tidyr)
+library(ggplot2)
+library(viridis)
+library(ggrepel)
+library(patchwork)
+library(forcats)
+library(scales)
+library(tidyverse)
+#install.packages("eulerr")
+library(eulerr) 
+#install.packages("UpSetR")
+library(UpSetR)    
+
+```
+
+## FIGURE 3A: busted
+
+any reference to pathway is a reference to functional category
+
+Busted kind of indicates most everything would be interesting at as high a level as 'pathway'... i was surprised to find resolution improved at all as we explore some of the other methods (site/branch-site/branch)-level resolutions\n
+
+fubar, fel, and meme (all site/branch-site) point to taurine and cysteine as well as retinoid metabolism\n
+
+absrel (branch-level provides add'l evidence supporting those two pathways may be subject to more positive selection than others)
+
+```{r}
+
+
+
+theme_bold <- theme(
+  # ---- Base text ----
+  text = element_text(family = "sans"),
+
+  # ---- Axis titles ----
+  axis.title.x = element_text(size = 15, face = "bold", margin = margin(t = 8)),
+  axis.title.y = element_text(size = 15, face = "bold", margin = margin(r = 8)),
+
+  # ---- Axis tick labels ----
+  axis.text.x  = element_text(size = 12, face = "bold", color = "black",
+                              margin = margin(t = 4)),
+  axis.text.y  = element_text(size = 12, face = "bold", color = "black",
+                              margin = margin(r = 4)),
+
+  # ---- Axis lines ----
+  axis.line = element_line(size = 0.9, color = "black"),
+
+  # ---- Facet strips ----
+  strip.text = element_text(size = 14, face = "bold", color = "black",
+                            margin = margin(t = 4, b = 4)),
+  strip.background = element_rect(fill = "grey92", color = "grey60", linewidth = 0.6),
+
+  # ---- Legend ----
+  legend.title = element_text(size = 13, face = "bold"),
+  legend.text  = element_text(size = 11, face = "bold"),
+  legend.key.size = unit(0.9, "lines"),
+  legend.position = "top",
+
+  # ---- Panel ----
+  panel.grid = element_blank(),
+  panel.background = element_rect(fill = "white", color = NA),
+
+  # ---- Plot title ----
+  plot.title = element_text(size = 17, face = "bold", hjust = 0.5,
+                            margin = margin(b = 8)),
+
+  # ---- Margins ----
+  plot.margin = margin(10, 12, 10, 10)
+)
+
+
+
+
+inset_style <- function() {
+  list(
+    # --- Dark, visible jitter points ---
+    scale_color_manual(values = Category),
+
+    # --- Text + theme settings ---
+    theme(
+        text = element_text(family = "sans"),
+        
+      axis.text.y = element_blank(
+        # size = 12, face = "bold", color = "grey15",
+        # margin = margin(r = 0.1)
+      ),
+      axis.text.x = element_text(
+        size = 14, face = "bold", color = "grey15",
+        margin = margin(t = 1)
+      ),
+      axis.title.x = element_text(
+        size = 16, face = "bold"
+      ),
+      legend.position = "none",
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      plot.margin = margin(3, 6, 4, 4),
+      panel.grid = element_blank(),
+      panel.border = element_rect(color = "black", linewidth = 0.5)
+    )
+  )
+}
+
+
+Category_order <- c(
+  "Taurine and cysteine metabolism",
+  "Retinoid / vitamin A metabolism",
+  "Glycine metabolism",
+  "Fatty acid & cholesterol metabolism",
+  "Bile acid biosynthesis & metabolism"
+  
+  
+)
+
+
+
+Category <- c("Glycine metabolism" = "#0072B2", "Retinoid / vitamin A metabolism" = "darkorange", "Taurine and cysteine metabolism" = "#009E73", "Bile acid biosynthesis & metabolism" = "red","Fatty acid & cholesterol metabolism" = "purple")
+
+
+
+
+alpha_cut <- 0.10 #### this is alpha for fdr so okay to be 0.1 in this case...
+pos_thr   <- 0.10
+top_n_genes <- 25
+
+busted_res <- read.csv("tbusted_summary.csv", stringsAsFactors = FALSE) %>%
+  merge(
+    read_csv("gene_sets_union.csv"),
+    by.x = "gene", by.y = "symbol", all.x = TRUE
+  ) %>%
+  merge(
+    read_tsv("gene_lengths.tsv") %>%
+      group_by(gene_dir) %>%
+      summarise(avg_length = mean(seq_length, na.rm = TRUE), .groups = "drop"),
+    by.x = "gene", by.y = "gene_dir", all.x = TRUE
+  ) %>%
+  unique()
+
+busted_res <- busted_res %>%
+  rename(functional_category = pathway_label)
+
+busted_res <- filter_one2manyID(busted_res, "gene")
+
+busted_res <- exorcise(busted_res, "gene")
+
+# ---- clean / derive ----
+busted_clean <- busted_res %>%
+  mutate(
+    across(
+      c(
+        pval, lrt,
+        omega_positive, omega_neutral, omega_purifying,
+        proportion_positive, proportion_neutral, proportion_purifying,
+        avg_length
+      ),
+      as.numeric
+    ),
+    p_bh = p.adjust(
+      ifelse(is.na(pval), NA_real_, pmax(pval, .Machine$double.xmin)),
+      method = "BH"
+    ),
+    branches_clean = str_remove_all(coalesce(branches, ""), "^\\[|\\]$") %>%
+      str_replace_all('"', ""),
+    number_of_sequences_num = ifelse(
+      branches_clean == "",
+      NA_integer_,
+      str_count(branches_clean, ",\\s*") + 1
+    ),
+    prop_pos_ok = !is.na(proportion_positive) & proportion_positive >= 0.05,
+    prop_pur_ok = !is.na(proportion_purifying) & proportion_purifying >= 0.05,
+    omega_pos_plot = pmin(omega_positive, 100),
+    omega_pur_ratio = omega_neutral / pmax(omega_purifying, 1e-6),
+    omega_pur_plot = pmin(omega_pur_ratio, 100)
+  ) %>%
+  filter(
+    !is.na(functional_category),
+    !is.na(gene),
+    !is.na(pval),
+    !is.na(p_bh),
+    !is.na(omega_positive),
+    !is.na(omega_neutral),
+    !is.na(omega_purifying),
+    omega_positive < 100,
+    omega_neutral < 100,
+    omega_purifying < 100,
+    number_of_sequences_num >= 5
+  )
+
+
+
+
+# ---- top positive genes ----
+top_pos <- busted_clean %>%
+  filter(
+    pval < 0.05,
+    p_bh <= alpha_cut,
+    !is.na(proportion_positive),
+    !is.na(omega_pos_plot),
+    omega_positive >= 1,
+    omega_neutral <= 1,
+    omega_purifying <= omega_neutral,
+    prop_pos_ok
+  ) %>%
+  group_by(functional_category) %>%
+  slice_max(order_by = proportion_positive, n = top_n_genes, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    subgroup = "POS",
+    x = proportion_positive,
+    y = omega_pos_plot
+  )
+
+# ---- top purifying genes ----
+top_pur <- busted_clean %>%
+  filter(
+    pval < 0.05,
+    p_bh <= alpha_cut,
+    !is.na(proportion_purifying),
+    !is.na(omega_pur_plot),
+    omega_purifying <= omega_neutral,
+    omega_neutral <= 1,
+    omega_positive >= 1,
+    prop_pur_ok
+  ) %>%
+  group_by(functional_category) %>%
+  slice_max(order_by = proportion_purifying, n = top_n_genes, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    subgroup = "PUR",
+    x = proportion_purifying,
+    y = -omega_pur_plot
+  )
+
+# ---- combine for single mirrored plot ----
+plot_dat <- bind_rows(top_pos, top_pur) %>%
+  distinct(gene, functional_category, subgroup, .keep_all = TRUE) %>%
+  filter(!is.na(x), !is.na(y), between(x, 0, 1))
+
+# ---- equal-space mirrored scaling ----
+pos_max_raw <- plot_dat %>%
+  filter(subgroup == "POS") %>%
+  summarise(v = max(y, na.rm = TRUE)) %>%
+  pull(v)
+
+neg_max_raw <- plot_dat %>%
+  filter(subgroup == "PUR") %>%
+  summarise(v = max(abs(y), na.rm = TRUE)) %>%
+  pull(v)
+
+if (!is.finite(pos_max_raw) || pos_max_raw <= 0) pos_max_raw <- 1
+if (!is.finite(neg_max_raw) || neg_max_raw <= 0) neg_max_raw <- 1
+
+plot_dat <- plot_dat %>%
+  mutate(
+    y_plot = case_when(
+      subgroup == "POS" ~ y / pos_max_raw,
+      subgroup == "PUR" ~ y / neg_max_raw,
+      TRUE ~ NA_real_
+    )
+  )
+
+pretty_pos <- pretty(c(0, pos_max_raw), n = 4)
+pretty_neg <- pretty(c(0, neg_max_raw), n = 4)
+
+pretty_pos <- pretty_pos[pretty_pos > 0 & pretty_pos <= pos_max_raw]
+pretty_neg <- pretty_neg[pretty_neg > 0 & pretty_neg <= neg_max_raw]
+
+neg_breaks <- -(pretty_neg / neg_max_raw)
+pos_breaks <-  (pretty_pos / pos_max_raw)
+
+y_breaks <- c(neg_breaks, 0, pos_breaks)
+y_labels <- c(as.character(pretty_neg), "0", as.character(pretty_pos))
+
+pos_one_line <- if (pos_max_raw >= 1)  1 / pos_max_raw else NA_real_
+neg_one_line <- if (neg_max_raw >= 1) -1 / neg_max_raw else NA_real_
+
+# ---- label all genes with original intensity > 1 on either side ----
+label_df <- plot_dat %>%
+  filter(abs(y) > 1)
+
+# ---- all-gene inset data ----
+path_order <- busted_clean %>%
+  filter(!is.na(proportion_positive)) %>%
+  group_by(functional_category) %>%
+  summarise(med_pos = median(proportion_positive, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(med_pos)) %>%
+  pull(functional_category)
+
+inset_dat <- busted_clean %>%
+  filter(
+    !is.na(functional_category),
+    !is.na(proportion_positive),
+    !is.na(omega_positive),
+    is.finite(proportion_positive),
+    is.finite(omega_positive)
+  ) %>%
+  transmute(
+    gene,
+  functional_category= factor(functional_category, levels = path_order),
+    breadth = proportion_positive,
+    intensity = omega_positive,
+    avg_length = avg_length
+  )
+
+# ---- one-vs-rest Wilcoxon tests on ENTIRE distributions ----
+wilcox_vs_rest <- function(dat, value_col) {
+  vals <- dat[[value_col]]
+  levs <- levels(dat$functional_category)
+
+  out <- lapply(levs, function(pw) {
+    x <- dat %>% filter(functional_category == pw) %>% pull(.data[[value_col]])
+    y <- dat %>% filter(functional_category != pw) %>% pull(.data[[value_col]])
+
+    p_raw <- if (length(x) >= 2 && length(y) >= 2) {
+      tryCatch(
+        wilcox.test(x, y, exact = FALSE)$p.value,
+        error = function(e) NA_real_
+      )
+    } else {
+      NA_real_
+    }
+
+    tibble(
+    functional_category= factor(pw, levels = levs),
+      n_pathway = length(x),
+      n_rest = length(y),
+      med_path = ifelse(length(x) > 0, median(x, na.rm = TRUE), NA_real_),
+      med_rest = ifelse(length(y) > 0, median(y, na.rm = TRUE), NA_real_),
+      p_raw = p_raw
+    )
+  }) %>%
+    bind_rows() %>%
+    mutate(
+      p_bh = p.adjust(p_raw, method = "BH"),
+      sig_both = !is.na(p_raw) & !is.na(p_bh) & p_raw < 0.05 & p_bh <= 0.10
+    )
+
+  out
+}
+
+breadth_test <- wilcox_vs_rest(inset_dat, "breadth")
+intensity_test <- wilcox_vs_rest(inset_dat, "intensity")
+
+# ---- symbol placement on breadth distributions ----
+star_df <- inset_dat %>%
+  group_by(functional_category) %>%
+  summarise(y = max(breadth, na.rm = TRUE) + 0.03, .groups = "drop") %>%
+  left_join(breadth_test %>% select(functional_category, p_raw, p_bh, sig_both), by = "functional_category") %>%
+  filter(sig_both)
+
+cross_df <- inset_dat %>%
+  group_by(functional_category) %>%
+  summarise(y = max(breadth, na.rm = TRUE) + 0.06, .groups = "drop") %>%
+  left_join(intensity_test %>% select(functional_category, p_raw, p_bh, sig_both), by = "functional_category") %>%
+  filter(sig_both)
+
+
+
+inset_dat$functional_category <- factor(inset_dat$functional_category, levels = Category_order)
+star_df$functional_category  <- factor(star_df$functional_category,  levels = Category_order)
+cross_df$functional_category <- factor(cross_df$functional_category, levels = Category_order)
+
+
+
+#dummy plot 
+
+legend_plot_obj <- ggplot(
+  inset_dat,
+  aes(x = functional_category, y = 1, color = functional_category)
+) +
+  geom_point(size = 3) +
+  scale_color_manual(values = Category) +
+  labs(color = "Category") +
+  guides(color = guide_legend(reverse = TRUE)) +
+  theme_minimal(base_size = 9) +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 9, face = "bold"),
+    legend.text = element_text(size = 8),
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank()
+  ) + inset_style() + theme(legend.position = "right",
+    legend.title = element_text(size = 9, face = "bold"),
+    legend.text = element_text(size = 8))
+
+
+
+color_legend <- cowplot::get_legend(
+  legend_plot_obj +
+    guides(color = guide_legend(
+      title.position = "top",
+      title.hjust = 0.5,
+      ncol = 1, reverse = TRUE       
+    )) +
+    theme(
+      legend.box = "vertical",   
+      legend.text = element_text(size = 12),
+      legend.title = element_text(size = 14, face = "bold"),
+      panel.border = element_blank()
+    ))
+
+
+
+legend_only_plot <- cowplot::ggdraw(color_legend)
+
+legend_only_plot
+
+ggsave(file.path(output_dir,
+  "inset_color_legend.tiff"),
+  legend_only_plot,
+  width = 3.5,
+  height = 1.5,
+  dpi = 300,
+  bg = "white"
+)
+
+
+
+
+#title and subtitle
+
+    # title = "Inset: pathway-level distribution tests",
+    # subtitle = "* breadth distribution; \u2020 intensity distribution;\nsymbols shown only when p < 0.05 and BH-adjusted p \u2264 0.10",
+
+
+# ---- inset plot ----
+p_inset <- ggplot(inset_dat, aes(functional_category, breadth, color = functional_category)) +
+  geom_violin(fill = "grey90", color = "grey45", scale = "width", alpha = 0.95) +
+  geom_jitter(width = 0.12, size = 0.9, alpha = 0.75, stroke = 0.2,
+              show.legend = FALSE) +
+  geom_text(
+    data = star_df,
+    aes(x = functional_category, y = y),
+    label = "*",
+    inherit.aes = FALSE,
+    color = "black",
+    size = 10.0
+  ) +
+  geom_text(
+    data = cross_df,
+    aes(x = functional_category, y = y),
+    label = "\u2020",
+    inherit.aes = FALSE,
+    color = "black",
+    size = 9.0
+  ) +
+  coord_flip(clip = "off") +
+  scale_color_manual(values = Category)+
+  scale_y_continuous(
+    limits = c(0, max(c(inset_dat$breadth, star_df$y, cross_df$y), na.rm = TRUE) + 0.02),
+    name = "Positive-site proportion across all genes"
+  ) +
+  labs(
+    x = NULL,
+    color = "Category"
+  ) +
+  theme_minimal(base_size = 9) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", size = 9),
+    plot.subtitle = element_text(size = 8),
+    axis.text.y = element_text(size = 7),
+    axis.text.x = element_text(size = 7),
+    legend.position = "none",
+    plot.margin = margin(4, 10, 4, 4)
+  ) + inset_style()
+
+#title and subtitle 
+    # title = "Top BH-significant genes across Categorys",
+    # subtitle = paste0(
+    #   "Single mirrored descriptive panel with equal visual space above and below zero. ",
+    #   "Category identity is encoded by color."
+    # ),
+
+# ---- single mirrored main plot ----
+p_main <- ggplot(plot_dat, aes(x = x, y = y_plot, color = functional_category)) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "grey25", linewidth = 0.45) +
+  geom_hline(yintercept = pos_one_line, linetype = "dashed", color = "grey55", linewidth = 0.35) +
+  geom_hline(yintercept = neg_one_line, linetype = "dashed", color = "grey55", linewidth = 0.35) +
+
+  geom_point(
+    data = plot_dat %>% filter(subgroup == "PUR", y_plot > 0),
+    size = 2.5,
+    alpha = 0.80
+  ) +
+
+  geom_point(
+    data = plot_dat %>% filter(subgroup == "POS"),
+    shape = 21,
+    size = 3.1,
+    stroke = 0.9,
+    fill = "white",
+    alpha = 1
+  ) +
+
+  geom_text_repel(
+    data = label_df,
+    aes(label = gene),
+    size = 2.8,
+    max.overlaps = Inf,
+    box.padding = 0.30,
+    point.padding = 0.20,
+    min.segment.length = 0,
+    segment.color = "grey55",
+    show.legend = FALSE
+  ) +
+  scale_color_manual(values = Category)+
+
+  scale_x_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    labels = scales::number_format(accuracy = 0.1),
+    name = "Breadth of inferred regime (proportion of sites)"
+  ) +
+scale_y_continuous(
+  limits = c(0, 1),
+  breaks = seq(0, 1, 0.2),
+  labels = seq(0, 1, 0.2),
+  name = expression("Positive regime intensity (" * omega[3] * ")")
+)+
+  # scale_y_continuous(
+  #   limits = c(-1, 1),
+  #   breaks = y_breaks,
+  #   labels = y_labels,
+  #   name = expression(
+  #     atop(
+  #       "Positive regime intensity (" * omega[3] * ")",
+  #       "Purifying regime intensity (" * omega[2] / omega[1] * ")"
+  #     )
+  #   )
+  # ) +
+  labs(
+    # title = "Top BH-significant genes across pathways",
+    # subtitle = paste0(
+    #   "Single mirrored descriptive panel with equal visual space above and below zero. ",
+    #   "Pathway identity is encoded by color."
+    # ),
+    color = "Category"
+  ) +
+
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"),
+    legend.position = "bottom",
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    axis.text.y = element_text(size = 8),
+    plot.margin = margin(5.5, 5.5, 5.5, 5.5)
+  ) 
+p_main <- p_main +theme_bold 
+
+# ---- integrate inset ----
+p_final <- p_main +
+  inset_element(
+    p_inset,
+    left = 0.64, bottom = 0.58, right = 0.98, top = 0.96,
+    align_to = "full"
+  )
+
+print(p_final)
+
+busted_supp_main <- busted_clean %>%
+  filter(pval < 0.05, p_bh <= alpha_cut) %>%
+  transmute(
+    gene, functional_category,
+    avg_length = round(avg_length, 1),
+    number_of_sequences = number_of_sequences_num,
+    pval = signif(pval, 4),
+    p_bh = signif(p_bh, 4),
+    lrt = round(lrt, 4),
+    omega_positive = round(omega_positive, 4),
+    omega_neutral = round(omega_neutral, 4),
+    omega_purifying = round(omega_purifying, 4),
+    proportion_positive = round(proportion_positive, 4),
+    proportion_neutral = round(proportion_neutral, 4),
+    proportion_purifying = round(proportion_purifying, 4)
+  ) %>%
+  arrange(functional_category, p_bh, pval)
+
+busted_supp_inset <- bind_rows(
+  breadth_test %>% mutate(test = "breadth"),
+  intensity_test %>% mutate(test = "intensity")
+) %>%
+  transmute(
+    functional_category, test,
+    n_pathway, n_rest,
+    p_raw = signif(p_raw, 4),
+    p_bh = signif(p_bh, 4),
+    sig_both,
+    med_path = round(med_path, 4),
+    med_rest = round(med_rest, 4),
+  ) %>%
+  arrange(test, p_bh, p_raw)
+
+
+
+ggsave(file.path(output_dir,"Fig3Busted.A.tiff"), plot = p_main, height = 8, width = 15)
+
+
+ggsave(file.path(output_dir,"Fig3InsetBusted.A.tiff"), plot = p_inset, height = 8, width = 15)
+
+p_final
+
+labeled_gene_table <- label_df %>%
+  transmute(
+    gene,
+    functional_category,
+    subgroup,
+    breadth = round(x, 4),
+    plotted_intensity = round(abs(y), 4),
+    pval = signif(pval, 4),
+    p_bh = signif(p_bh, 4),
+    lrt = round(lrt, 4),
+    omega_positive = round(omega_positive, 4),
+    omega_neutral = round(omega_neutral, 4),
+    omega_purifying = round(omega_purifying, 4),
+    proportion_positive = round(proportion_positive, 4),
+    proportion_neutral = round(proportion_neutral, 4),
+    proportion_purifying = round(proportion_purifying, 4)
+  ) %>%
+  arrange(subgroup, functional_category, desc(plotted_intensity), desc(breadth))
+## SUPPL TABLE
+labeled_gene_table #%>% dplyr::filter("POS" %in% subgroup) %>% pull(gene) %>% unique()
+
+write.csv(labeled_gene_table,file.path(output_dir, file = "labeled_gene_table.csv"))
+
+
+write.csv(breadth_test,file.path(output_dir, file="breadth_test_BUSTED.csv"))
+write.csv(intensity_test,file.path(output_dir, file = "intensity_test_BUSTED.csv"))
+write.csv(plot_dat,file.path(output_dir, file = "plot_dat.csv"))
+write.csv(busted_supp_inset,file.path(output_dir, file = "busted_supp_inset.csv"))
+write.csv(busted_supp_main,file.path(output_dir, file = "busted_supp_main.csv"))
+
+```
+
+
+
+## FIGURE 3D: meme
+```{r}
+
+set.seed(100)
+
+meme_p_thresh <- 0.05
+top_n_per_pathway <- 5
+nominal_p_cut <- 0.05
+
+tiny <- 1e-6
+omega_cap <- 100
+
+meme_res <- read.csv("tmeme_summary.csv", stringsAsFactors = FALSE)
+
+#### expected MEME columns
+#### gene,branch,site_positions,site_pval,site_LRT,site_alpha,site_beta_plus,site_MEMElogl,site_substitution
+
+function_metadata <- read_csv("gene_sets_union.csv")
+
+## merges metadata to MEME data
+meme_res <- merge(
+  meme_res,
+  function_metadata,
+  by.x = "gene",
+  by.y = "symbol",
+  all.x = TRUE
+)
+
+meme_res$branch <- gsub("\\|", "_", meme_res$branch)
+
+gene_length <- read_tsv("gene_lengths.tsv") %>%
+  mutate(gene_id = toupper(gene_id))
+
+meme_res <- merge(meme_res, gene_length, by.x = "branch", by.y = "gene_id")
+
+meme_res <- filter_one2manyID(meme_res, "gene")
+
+meme_res <- exorcise(meme_res, "gene")
+
+## compute avg_length + number_of_sequences_num BEFORE dropping branch
+meme_res <- meme_res %>%
+  filter(!str_detect(branch, "Node|NODE|root")) %>%
+  group_by(gene) %>%
+  mutate(
+    avg_length = mean(seq_length, na.rm = TRUE),
+    number_of_sequences_num = n_distinct(branch) >= 5
+  ) %>%
+  ungroup() %>%
+  mutate(
+    ## if seq_length is nucleotide length instead of codon length, change to avg_length / 3
+    denom_sites = avg_length
+  )
+
+safe_first <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) NA_real_ else x[1]
+}
+
+## ==================================================
+## MEME site table
+## expand branch-level list columns, then collapse to one row per gene/pathway/site
+## so downstream analysis is concordant with FUBAR/FEL
+## ==================================================
+meme_q_thresh <- 0.10
+
+meme_res <- meme_res %>%
+  rename(functional_category = pathway_label)
+
+
+meme_sites <- meme_res %>%
+  mutate(
+    across(
+      c(
+        site_positions, site_pval, site_LRT,
+        site_alpha, site_beta_plus, site_MEMElogl,
+        site_substitution
+      ),
+      ~ {
+        x <- as.character(.x)
+        x <- str_remove_all(x, "^\\s*\\[|\\]\\s*$")
+        x <- str_replace_all(x, "\\s*'\\s*|\\s*\"\\s*", "")
+        str_trim(x)
+      }
+    )
+  ) %>%
+  separate_rows(
+    site_positions, site_pval, site_LRT,
+    site_alpha, site_beta_plus, site_MEMElogl,
+    site_substitution,
+    sep = ",\\s*", convert = FALSE
+  ) %>%
+  mutate(
+    site = as.integer(site_positions),
+    alpha = as.numeric(site_alpha),
+    beta_plus = as.numeric(site_beta_plus),
+    pval = as.numeric(site_pval),
+    lrt = as.numeric(site_LRT),
+    memelogl = as.numeric(site_MEMElogl),
+    avg_length = as.numeric(avg_length),
+    denom_sites = as.numeric(denom_sites),
+    number_of_sequences_num = as.numeric(number_of_sequences_num)
+  ) %>%
+  filter(!is.na(site), !is.na(functional_category), !is.na(pval)) %>%
+  group_by(gene) %>%
+  mutate(
+    p_adj_branch = p.adjust(pval, method = "BH")
+  ) %>%
+  ungroup() %>%
+  mutate(
+    is_sig_pos_site_branch = pval < meme_p_thresh &
+      p_adj_branch <= meme_q_thresh &
+      beta_plus > alpha,
+    omega_branch = pmin(beta_plus / pmax(alpha, tiny), omega_cap)
+  ) %>%
+group_by(gene, functional_category, site) %>%
+  summarise(
+    avg_length = safe_first(avg_length),
+    denom_sites = safe_first(denom_sites),
+    number_of_sequences_num = safe_first(number_of_sequences_num),
+    is_sig_pos_site = any(is_sig_pos_site_branch, na.rm = TRUE),
+    is_pos_site = is_sig_pos_site,
+    omega_site = ifelse(
+      any(is_sig_pos_site_branch, na.rm = TRUE),
+      max(omega_branch[is_sig_pos_site_branch], na.rm = TRUE),
+      NA_real_
+    ),
+    alpha_site = ifelse(   
+      any(is_sig_pos_site_branch, na.rm = TRUE),
+      safe_first(alpha[is_sig_pos_site_branch]),
+      NA_real_
+    ),
+    beta_plus_site = ifelse(    
+      any(is_sig_pos_site_branch, na.rm = TRUE),
+      safe_first(beta_plus[is_sig_pos_site_branch]),
+      NA_real_
+    ),
+    pval_site = ifelse(                                           
+      any(is_sig_pos_site_branch, na.rm = TRUE),
+      min(pval[is_sig_pos_site_branch], na.rm = TRUE),
+      NA_real_
+    ),
+    lrt_site = ifelse(                  
+      any(is_sig_pos_site_branch, na.rm = TRUE),
+      max(lrt[is_sig_pos_site_branch], na.rm = TRUE),
+      NA_real_
+    ),
+    size_metric = ifelse(
+      any(is_sig_pos_site_branch, na.rm = TRUE),
+      pmax(
+        pmin(max(omega_branch[is_sig_pos_site_branch], na.rm = TRUE), omega_cap),
+        1.01
+      ),
+      NA_real_
+    ),
+    .groups = "drop"
+  )
+## ==================================================
+## MAIN MEME PANEL
+## significant positive sites only
+## top 5 genes per pathway by breadth of significant positive sites
+## ==================================================
+
+meme_gene_main <- meme_sites %>%
+  filter(!is.na(functional_category), !is.na(site)) %>%
+  distinct(gene, functional_category, site, .keep_all = TRUE) %>%
+  group_by(gene, functional_category) %>%
+  summarise(
+    avg_length = safe_first(avg_length),
+    denom_sites = safe_first(denom_sites),
+    n_sites_reported = n_distinct(site),
+    n_sig_pos_sites = sum(is_sig_pos_site, na.rm = TRUE),
+    prop_sig_pos = ifelse(!is.na(denom_sites) & denom_sites > 0, n_sig_pos_sites / denom_sites, NA_real_),
+    sig_pos_omega_intensity = ifelse(
+      any(is_sig_pos_site),
+      median(omega_site[is_sig_pos_site], na.rm = TRUE),
+      NA_real_
+    ),
+    bar_length = ifelse(
+      !is.na(avg_length) & avg_length > 0,
+      avg_length,
+      as.numeric(n_sites_reported)
+    ),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(prop_sig_pos), is.finite(prop_sig_pos), denom_sites > 0)
+
+top_genes <- meme_gene_main %>%
+  filter(n_sig_pos_sites > 0) %>%
+  group_by(functional_category) %>%
+  arrange(desc(prop_sig_pos), desc(sig_pos_omega_intensity), gene, .by_group = TRUE) %>%
+  mutate(plot_rank = row_number()) %>%
+  filter(plot_rank <= top_n_per_pathway) %>%
+  ungroup()
+
+gene_order <- top_genes %>%
+  arrange(functional_category, plot_rank, gene) %>%
+  pull(gene) %>%
+  unique()
+
+site_plot <- meme_sites %>%
+  semi_join(top_genes %>% select(gene, functional_category), by = c("gene", "functional_category")) %>%
+  filter(is_sig_pos_site) %>%
+  mutate(gene = factor(gene, levels = rev(gene_order)))
+
+gene_bg <- top_genes %>%
+  transmute(
+    gene = factor(gene, levels = rev(gene_order)),
+    functional_category,
+    bar_length
+  )
+
+#title and subtitle 
+    # title = "Significant episodic positive-selection sites across top genes (MEME)",
+    # subtitle = paste0(
+    #   "Only sites with p \u2264 ", meme_p_thresh,
+    #   " and \u03b2+ > \u03b1 are shown. Top 5 genes per pathway are ranked by the breadth of significant positive sites."
+
+
+  # facet_wrap(~ functional_category, scales = "free_y", ncol = 1) +
+  # scale_size_continuous(
+  #   name = "Positive-site ω",
+  #   range = c(1.2, 4.5)
+
+pMEME <- ggplot() +
+  geom_segment(
+    data = gene_bg,
+    aes(x = 1, xend = bar_length, y = gene, yend = gene),
+    color = "grey90",
+    linewidth = 2.2
+  ) +
+  geom_point(
+    data = site_plot,
+    aes(x = site, y = gene, size = size_metric),
+    color = "#D55E00",
+    alpha = 0.85
+  ) +
+  facet_wrap(~ functional_category, scales = "free_y", ncol = 1) +
+  scale_size_continuous(
+  name = expression(bold("Positive-site strength (" * beta^ "+"/ alpha * ")")),
+  range = c(1.2, 4.5)
+) +
+    scale_color_manual(values = Category)+
+  labs(
+    x = "Codon position",
+    y = NULL,
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 7),
+    strip.text = element_text(face = "bold")
+  )
+
+pMEME <- pMEME + theme_bold 
+
+
+
+pMEME
+
+## --------------------------------------------------
+## pathway-level inset: full-distribution tests, consistent with FUBAR/FEL
+## * = breadth distribution differs from all other pathways
+## † = intensity distribution differs from all other pathways
+## symbols shown only when raw p < 0.05 AND BH-adjusted p <= 0.10
+## --------------------------------------------------
+
+inset_dat <- meme_gene_main %>%
+  transmute(
+    gene,
+  functional_category= as.character(functional_category),
+    breadth = prop_sig_pos,
+    intensity = sig_pos_omega_intensity
+  ) %>%
+  filter(!is.na(breadth), is.finite(breadth))
+
+path_order <- inset_dat %>%
+  group_by(functional_category) %>%
+  summarise(med = median(breadth, na.rm = TRUE), .groups = "drop") %>%
+  arrange(med) %>%
+  pull(functional_category)
+
+inset_dat$functional_category <- factor(inset_dat$functional_category, levels = path_order)
+
+wilcox_vs_rest <- function(dat, value_col) {
+  levs <- levels(dat$functional_category)
+
+  bind_rows(lapply(levs, function(pw) {
+    x <- dat %>%
+      filter(functional_category == pw) %>%
+      pull(.data[[value_col]])
+
+    y <- dat %>%
+      filter(functional_category != pw) %>%
+      pull(.data[[value_col]])
+
+    x <- x[is.finite(x)]
+    y <- y[is.finite(y)]
+
+    p_raw <- if (length(x) >= 2 && length(y) >= 2) {
+      tryCatch(
+        wilcox.test(x, y, exact = FALSE)$p.value,
+        error = function(e) NA_real_
+      )
+    } else {
+      NA_real_
+    }
+
+    tibble(
+    functional_category= factor(pw, levels = levs),
+      n_path = length(x),
+      n_rest = length(y),
+      med_path = ifelse(length(x) > 0, median(x, na.rm = TRUE), NA_real_),
+      med_rest = ifelse(length(y) > 0, median(y, na.rm = TRUE), NA_real_),
+      p_raw = p_raw
+    )
+  })) %>%
+    mutate(
+      p_bh = p.adjust(p_raw, method = "BH"),
+      sig_both = !is.na(p_raw) & !is.na(p_bh) & p_raw < 0.05 & p_bh <= 0.10
+    )
+}
+
+breadth_test <- wilcox_vs_rest(inset_dat, "breadth")
+intensity_test <- wilcox_vs_rest(inset_dat, "intensity")
+
+pad <- 0.03
+
+star_df <- inset_dat %>%
+  group_by(functional_category) %>%
+  summarise(y = max(breadth, na.rm = TRUE) + pad, .groups = "drop") %>%
+  left_join(
+    breadth_test %>% select(functional_category, p_raw, p_bh, sig_both),
+    by = "functional_category"
+  ) %>%
+  filter(sig_both)
+
+cross_df <- inset_dat %>%
+  group_by(functional_category) %>%
+  summarise(y = max(breadth, na.rm = TRUE) + 2 * pad, .groups = "drop") %>%
+  left_join(
+    intensity_test %>% select(functional_category, p_raw, p_bh, sig_both),
+    by = "functional_category"
+  ) %>%
+  filter(sig_both)
+
+
+inset_dat$functional_category <- factor(inset_dat$functional_category, levels = Category_order)
+star_df$functional_category  <- factor(star_df$functional_category,  levels = Category_order)
+cross_df$functional_category <- factor(cross_df$functional_category, levels = Category_order)
+
+#title and subtitle 
+    # title = "Gene-level MEME breadth distributions with pathway-level breadth/intensity tests",
+    # subtitle = "* breadth distribution; \u2020 intensity distribution; symbols shown only when raw p < 0.05 and BH-adjusted p \u2264 0.10",
+
+p_inset <- ggplot(inset_dat, aes(functional_category, breadth, color = functional_category)) +
+  geom_violin(fill = "grey90", color = "grey45", scale = "width", alpha = 0.95) +
+geom_jitter(width = 0.12, size = 0.9, alpha = 0.75, stroke = 0.2,
+              show.legend = FALSE) +
+  geom_text(
+    data = star_df,
+    aes(x = functional_category, y = y),
+    label = "*",
+    inherit.aes = FALSE,
+    color = "black",
+    size = 10.0
+  ) +
+  geom_text(
+    data = cross_df,
+    aes(x = functional_category, y = y),
+    label = "\u2020",
+    inherit.aes = FALSE,
+    color = "black",
+    size = 9.0
+  ) +
+  coord_flip(clip = "off") +
+  scale_color_manual(values = Category)+
+  scale_y_continuous(
+    limits = c(0, max(c(inset_dat$breadth, star_df$y, cross_df$y), na.rm = TRUE) + 0.02),
+    name = "Positive-site proportion across all genes"
+  ) +
+  labs(
+    x = NULL,
+    color = "Category"
+  ) +
+  theme_minimal(base_size = 9) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", size = 9),
+    plot.subtitle = element_text(size = 8),
+    axis.text.y = element_text(size = 7),
+    axis.text.x = element_text(size = 7),
+    legend.position = "none",
+    plot.margin = margin(4, 10, 4, 4)
+  ) +inset_style()
+
+p_inset_meme <- p_inset +
+  theme(
+    plot.background = element_rect(fill = "white", color = "grey70", linewidth = 0.4),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.margin = margin(3, 3, 3, 3),
+    plot.title = element_text(size = 8, face = "bold"),
+    plot.subtitle = element_text(size = 6),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 6),
+    axis.text.x = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    legend.position = "none"
+  )
+
+pMEME_final <- pMEME + inset_element(
+  p_inset_meme,
+  left = 0.66,
+  right = 0.995,
+  bottom = 0.08,
+  top = 0.44,
+  align_to = "panel"
+)
+
+
+ggsave(file.path(output_dir,"Fig3MEME.D.tiff"),plot = pMEME, height = 8, width = 15)
+
+
+
+ggsave(file.path(output_dir,"Fig3inset.D.tiff"),plot = p_inset, height = 8, width = 15)
+
+pMEME_final
+# 
+# breadth_test %>% arrange(p_bh, p_raw)
+# intensity_test %>% arrange(p_bh, p_raw)
+
+meme_supp_main <- meme_sites %>%
+  filter(is_sig_pos_site) %>%
+  group_by(gene, functional_category) %>%
+  summarise(
+    number_of_sequences = safe_first(number_of_sequences_num),
+    avg_length          = safe_first(avg_length),
+    n_sig_pos_sites     = sum(is_sig_pos_site, na.rm = TRUE),
+    prop_sig_pos        = safe_first(n_sig_pos_sites) / safe_first(denom_sites),
+    sig_pos_omega_intensity = median(omega_site, na.rm = TRUE),
+    n_sites_reported    = safe_first(denom_sites),
+    sig_site_positions  = paste(sort(unique(site)), collapse = ", "),
+    sig_site_alpha      = paste(round(alpha_site[order(site)], 4), collapse = ", "),
+    sig_site_beta_plus  = paste(round(beta_plus_site[order(site)], 4), collapse = ", "),
+    sig_site_omegas     = paste(round(omega_site[order(site)], 4), collapse = ", "),
+    sig_site_lrts       = paste(round(lrt_site[order(site)], 4), collapse = ", "),
+    sig_site_pvalues    = paste(signif(pval_site[order(site)], 4), collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  transmute(
+    gene,
+    functional_category,
+    avg_length          = round(avg_length, 1),
+    number_of_sequences,
+    n_sites_reported,
+    n_sig_pos_sites,
+    prop_sig_pos        = round(prop_sig_pos, 4),
+    sig_pos_omega_intensity = round(sig_pos_omega_intensity, 4),
+    sig_site_positions,
+    sig_site_alpha,
+    sig_site_beta_plus,
+    sig_site_omegas,
+    sig_site_lrts,
+    sig_site_pvalues
+  ) %>%
+  arrange(functional_category, desc(prop_sig_pos), desc(sig_pos_omega_intensity))
+
+meme_supp_inset <- bind_rows(
+  breadth_test %>% mutate(test = "breadth"),
+  intensity_test %>% mutate(test = "intensity")
+) %>%
+  transmute(
+    functional_category, test,
+    n_path, n_rest,
+    med_path = round(med_path, 4),
+    med_rest = round(med_rest, 4),
+    p_raw = signif(p_raw, 4),
+    p_bh = signif(p_bh, 4),
+    sig_both
+  ) %>%
+  arrange(test, p_bh, p_raw)
+
+
+write.csv(breadth_test,file.path(output_dir, file="breadth_test_MEME.csv"))
+write.csv(intensity_test,file.path(output_dir, file = "intensity_test_MEME.csv"))
+write.csv(meme_supp_inset,file.path(output_dir, file = "meme_supp_inset.csv"))
+write.csv(meme_supp_main,file.path(output_dir, file = "meme_supp_main.csv"))
+
+
+```
+
+
+
+
+
+
+
+## FIGURE 3C: fel
+```{r}
+
+
+set.seed(100)
+
+fel_p_thresh <- 0.05
+fel_q_thresh <- 0.10
+alpha_cut <- 0.10
+omega_cap <- 100
+top_n_per_pathway <- 5
+
+## helpies
+safe_first <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) NA_real_ else x[1]
+}
+
+clean_hyphy_vec <- function(x) {
+  x <- as.character(x)
+  x[is.na(x)] <- ""
+  x <- str_remove_all(x, "^\\s*\\[|\\]\\s*$")
+  x <- str_replace_all(x, "\\s*'\\s*|\\s*\"\\s*", "")
+  x <- str_trim(x)
+  x[x == "" | x == "NA"] <- NA_character_
+  x
+}
+
+clean_num <- function(x) {
+  x %>%
+    as.character() %>%
+    str_replace_all("\u2212", "-") %>%
+    str_replace_all("\\s+", "") %>%
+    str_replace_all("(,)(?=\\d{3}(?:[^\\d]|$))", "") %>%
+    str_replace_all("[^0-9eE+\\-\\.]", "") %>%
+    na_if("") %>%
+    as.numeric()
+}
+
+parse_partition_range <- function(x) {
+  x <- as.character(x)
+  m <- str_match(x, ".*?(\\d+)\\D+(\\d+).*")
+  tibble(
+    partition_start = suppressWarnings(as.integer(m[, 2])),
+    partition_end   = suppressWarnings(as.integer(m[, 3]))
+  )
+}
+
+## conservative BH when only reported-site p-values are available:
+## pad missing unreported codons with p = 1
+bh_with_missing_as_one <- function(p_sig, m_total) {
+  out <- rep(NA_real_, length(p_sig))
+  idx <- which(!is.na(p_sig))
+
+  if (length(idx) == 0) return(out)
+
+  m_total <- as.integer(m_total[1])
+
+  if (is.na(m_total) || m_total < length(idx)) {
+    return(out)
+  }
+
+  padded <- c(p_sig[idx], rep(1, m_total - length(idx)))
+  out[idx] <- p.adjust(padded, method = "BH")[seq_along(idx)]
+  out
+}
+
+## =========================================================
+## read + merge metadata
+## =========================================================
+
+fel_res <- read.csv("tfel_summary.csv", stringsAsFactors = FALSE)
+
+function_metadata <- read_csv("gene_sets_union.csv")
+fel_res <- merge(
+  fel_res,
+  function_metadata,
+  by.x = "gene_id",
+  by.y = "symbol",
+  all.x = TRUE
+)
+
+
+fel_res <- fel_res %>%
+  rename(functional_category = pathway_label)
+
+gene_length <- read_tsv("gene_lengths.tsv") %>%
+  mutate(gene_id = toupper(gene_id))
+
+fel_res <- merge(
+  fel_res,
+  gene_length,
+  by.x = "branch_id",
+  by.y = "gene_id"
+)
+
+fel_res <- fel_res %>%
+  filter(!str_detect(branch_id, regex("node|root", ignore_case = TRUE))) %>%   
+  dplyr::select(-any_of("fasta_file")) %>%
+  distinct() %>%
+  group_by(gene_id) %>%
+  mutate(n_seqs_gene = n_distinct(branch_id)) %>%
+  ungroup() %>%
+  filter(n_seqs_gene >= 5)  
+
+fel_res <- filter_one2manyID(fel_res, "gene_id")
+
+fel_res <- exorcise(fel_res, "gene_id")
+
+## gene-wide average length from branch-level seq_length if present
+if ("seq_length" %in% names(fel_res)) {
+  fel_res <- fel_res %>%
+    group_by(gene_id) %>%
+    mutate(avg_length = mean(seq_length, na.rm = TRUE)) %>%
+    ungroup() %>%
+    dplyr::select(-seq_length) %>%
+    distinct()
+} else if (!"avg_length" %in% names(fel_res)) {
+  fel_res$avg_length <- NA_real_
+}
+
+## keep pathway map separate so pathway duplication does not happen
+## before site-level q adjustment / collapsing
+pathway_map <- fel_res %>%
+  dplyr::select(gene_id, functional_category) %>%
+  filter(!is.na(functional_category)) %>%
+  distinct()
+
+## =========================================================
+## reconstruct gene-wide denominators from distinct partitions
+## =========================================================
+
+gene_denoms <- fel_res %>%
+  dplyr::select(
+    gene_id,
+    partition,
+    partition_codon_range,
+    FEL_n_sites,
+    avg_length
+  ) %>%
+  distinct()
+
+range_tbl <- parse_partition_range(gene_denoms$partition_codon_range)
+
+gene_denoms <- bind_cols(gene_denoms, range_tbl) %>%
+  mutate(
+    partition_width = case_when(
+      !is.na(partition_start) & !is.na(partition_end) ~ partition_end - partition_start + 1L,
+      TRUE ~ as.numeric(FEL_n_sites)
+    )
+  ) %>%
+  group_by(gene_id) %>%
+  summarise(
+    gene_n_sites = sum(unique(partition_width[!is.na(partition_width)]), na.rm = TRUE),
+    avg_length = safe_first(as.numeric(avg_length)),
+    .groups = "drop"
+  )
+
+## =========================================================
+## site-level parsing from reported FEL hit vectors
+## this summary table appears to contain only reported FEL hits,
+## not all tested site p-values, so BH is conservative
+## =========================================================
+
+site_cols <- c(
+  "FEL_sig_sites",
+  "FEL_site_pvalues",
+  "FEL_site_omegas",
+  "FEL_site_LRTs",
+  "FEL_site_classes",
+  "FEL_omega_coord",
+  "FEL_LRTs_site"
+)
+site_cols <- site_cols[site_cols %in% colnames(fel_res)]
+
+site_core <- fel_res %>%
+  dplyr::select(
+    gene_id,
+    branch_id,
+    partition,
+    partition_codon_range,
+    all_of(site_cols)
+  ) %>%
+  distinct()
+
+site_core <- bind_cols(site_core, parse_partition_range(site_core$partition_codon_range))
+
+fel_sites_raw <- site_core %>%
+  mutate(across(all_of(site_cols), clean_hyphy_vec)) %>%
+  separate_rows(all_of(site_cols), sep = ",\\s*", convert = FALSE) %>%
+  mutate(
+    site_local = clean_num(FEL_sig_sites),
+    site_from_coord = coalesce(
+      if ("FEL_omega_coord" %in% names(.)) clean_num(FEL_omega_coord) else rep(NA_real_, n()),
+      if ("FEL_LRTs_site" %in% names(.)) clean_num(FEL_LRTs_site) else rep(NA_real_, n())
+    ),
+    site = case_when(
+      !is.na(site_local) & !is.na(partition_start) ~ as.integer(partition_start + site_local - 1L),
+      !is.na(site_local) ~ as.integer(site_local),
+      !is.na(site_from_coord) ~ as.integer(site_from_coord),
+      TRUE ~ NA_integer_
+    ),
+    pvalue = clean_num(FEL_site_pvalues),
+    omega = clean_num(FEL_site_omegas),
+    lrt = clean_num(FEL_site_LRTs),
+    site_class = str_to_lower(str_trim(FEL_site_classes))
+  ) %>%
+  filter(!is.na(site), !is.na(pvalue))
+
+## collapse to unique gene-wide codons
+## when a codon is reported more than once, keep the strongest evidence
+fel_sites_gene <- fel_sites_raw %>%
+  arrange(gene_id, site, pvalue, desc(omega), desc(lrt)) %>%
+  group_by(gene_id, site) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  left_join(gene_denoms, by = "gene_id") %>%
+  group_by(gene_id) %>%
+  mutate(
+    p_adj = bh_with_missing_as_one(pvalue, gene_n_sites)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    is_sig_site = !is.na(pvalue) & pvalue < fel_p_thresh &
+      !is.na(p_adj) & p_adj <= fel_q_thresh,
+    is_pos_site = is_sig_site &
+      str_detect(site_class, "positive|divers") &
+      !is.na(omega) & omega <= omega_cap,
+    is_neg_site = is_sig_site &
+      str_detect(site_class, "negative|purif"),
+    size_metric = pmax(pmin(omega, omega_cap), 1.01)
+  )
+
+## =========================================================
+## gene-level breadth summaries
+## =========================================================
+
+fel_gene_core <- fel_sites_gene %>%
+  group_by(gene_id) %>%
+  summarise(
+    gene_n_sites = safe_first(gene_n_sites),
+    avg_length = safe_first(avg_length),
+    n_sig_pos_sites = sum(is_pos_site, na.rm = TRUE),
+    n_sig_neg_sites = sum(is_neg_site, na.rm = TRUE),
+    prop_sig_pos = ifelse(gene_n_sites > 0, n_sig_pos_sites / gene_n_sites, NA_real_),
+    median_pos_omega = ifelse(
+      n_sig_pos_sites > 0,
+      median(omega[is_pos_site], na.rm = TRUE),
+      NA_real_
+    ),
+    bar_length = ifelse(!is.na(avg_length) & avg_length > 0, avg_length, gene_n_sites),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(prop_sig_pos), gene_n_sites > 0)
+
+fel_gene <- pathway_map %>%
+  inner_join(fel_gene_core, by = "gene_id")
+
+## =========================================================
+## top genes per pathway by breadth
+## =========================================================
+
+
+
+top_by_breadth <- fel_gene %>%
+  filter(n_sig_pos_sites > 0) %>%
+  group_by(functional_category) %>%
+  arrange(
+    desc(prop_sig_pos),
+    desc(n_sig_pos_sites),
+    desc(median_pos_omega),
+    gene_id,
+    .by_group = TRUE
+  ) %>%
+  mutate(plot_rank = row_number()) %>%
+  filter(plot_rank <= top_n_per_pathway) %>%
+  ungroup()
+
+## =========================================================
+## main breadth panel
+## =========================================================
+
+gene_order <- top_by_breadth %>%
+  arrange(functional_category, plot_rank, gene_id) %>%
+  pull(gene_id) %>%
+  unique()
+
+site_plot <- fel_sites_gene %>%
+  filter(is_pos_site) %>%
+  inner_join(pathway_map, by = "gene_id") %>%
+  semi_join(
+    top_by_breadth %>% dplyr::select(gene_id, functional_category),
+    by = c("gene_id", "functional_category")
+  ) %>%
+  mutate(gene_id = factor(gene_id, levels = rev(gene_order)))
+
+gene_bg <- top_by_breadth %>%
+  transmute(
+    gene_id = factor(gene_id, levels = rev(gene_order)),
+    functional_category,
+    bar_length
+  )
+
+#title and subtitle 
+    # # title = "FEL positive-selection codons across genes ranked by breadth",
+    # # subtitle = paste0(
+    # #   "Genes are ranked within pathway by fraction of gene codons that are significant positive FEL sites. ",
+    # #   "Shown codons satisfy raw p < ", fel_p_thresh,
+    # #   ", BH q ≤ ", fel_q_thresh,
+    # #   ", positive class, and ω ≤ ", omega_cap, "."
+    # )
+
+pFEL_breadth <- ggplot() +
+  geom_segment(
+    data = gene_bg,
+    aes(x = 1, xend = bar_length, y = gene_id, yend = gene_id),
+    color = "grey90",
+    linewidth = 2.2
+  ) +
+  geom_point(
+    data = site_plot,
+    aes(x = site, y = gene_id, size = size_metric),
+    color = "#D55E00",
+    alpha = 0.85
+  ) +
+  facet_wrap(~ functional_category, scales = "free_y", ncol = 1) +
+  scale_size_continuous(
+    name = "Positive-site ω",
+    range = c(1.2, 4.5)
+  ) +
+    scale_color_manual(values = Category)+
+  labs(
+    x = "Gene-wide codon position",
+    y = NULL,
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 7),
+    strip.text = element_text(face = "bold")
+  ) 
+
+pFEL_breadth <- pFEL_breadth + theme_bold
+
+## =========================================================
+## pathway-level inset: full-distribution tests, consistent with FUBAR
+## * = breadth distribution differs from all other pathways
+## † = intensity distribution differs from all other pathways
+## symbols shown only when raw p < 0.05 AND BH-adjusted p <= 0.10
+## =========================================================
+
+inset_dat <- fel_gene %>%
+  transmute(
+    gene_id,
+  functional_category= as.character(functional_category),
+    breadth = prop_sig_pos,
+    intensity = median_pos_omega
+  ) %>%
+  filter(!is.na(breadth), is.finite(breadth))
+
+path_order <- inset_dat %>%
+  group_by(functional_category) %>%
+  summarise(med = median(breadth, na.rm = TRUE), .groups = "drop") %>%
+  arrange(med) %>%
+  pull(functional_category)
+
+inset_dat$functional_category <- factor(inset_dat$functional_category, levels = Category_order)
+
+wilcox_vs_rest <- function(dat, value_col) {
+  levs <- levels(dat$functional_category)
+
+  bind_rows(lapply(levs, function(pw) {
+    x <- dat %>%
+      filter(functional_category == pw) %>%
+      pull(.data[[value_col]])
+
+    y <- dat %>%
+      filter(functional_category != pw) %>%
+      pull(.data[[value_col]])
+
+    x <- x[is.finite(x)]
+    y <- y[is.finite(y)]
+
+    p_raw <- if (length(x) >= 2 && length(y) >= 2) {
+      tryCatch(
+        wilcox.test(x, y, exact = FALSE)$p.value,
+        error = function(e) NA_real_
+      )
+    } else {
+      NA_real_
+    }
+
+    tibble(
+    functional_category= factor(pw, levels = levs),
+      n_path = length(x),
+      n_rest = length(y),
+      med_path = ifelse(length(x) > 0, median(x, na.rm = TRUE), NA_real_),
+      med_rest = ifelse(length(y) > 0, median(y, na.rm = TRUE), NA_real_),
+      p_raw = p_raw
+    )
+  })) %>%
+    mutate(
+      p_bh = p.adjust(p_raw, method = "BH"),
+      sig_both = !is.na(p_raw) & !is.na(p_bh) & p_raw < 0.05 & p_bh <= 0.10
+    )
+}
+
+breadth_test <- wilcox_vs_rest(inset_dat, "breadth")
+intensity_test <- wilcox_vs_rest(inset_dat, "intensity")
+
+pad <- 0.03
+
+star_df <- inset_dat %>%
+  group_by(functional_category) %>%
+  summarise(y = max(breadth, na.rm = TRUE) + pad, .groups = "drop") %>%
+  left_join(
+    breadth_test %>% select(functional_category, p_raw, p_bh, sig_both),
+    by = "functional_category"
+  ) %>%
+  filter(sig_both)
+
+cross_df <- inset_dat %>%
+  group_by(functional_category) %>%
+  summarise(y = max(breadth, na.rm = TRUE) + 2 * pad, .groups = "drop") %>%
+  left_join(
+    intensity_test %>% select(functional_category, p_raw, p_bh, sig_both),
+    by = "functional_category"
+  ) %>%
+  filter(sig_both)
+
+upper_lim <- max(c(inset_dat$breadth, star_df$y, cross_df$y), na.rm = TRUE) + 0.02
+
+
+inset_dat$functional_category <- factor(inset_dat$functional_category, levels = Category_order)
+star_df$functional_category  <- factor(star_df$functional_category,  levels = Category_order)
+cross_df$functional_category <- factor(cross_df$functional_category, levels = Category_order)
+
+#title and subtitle
+    # title = "Gene-level FEL breadth distributions with pathway-level breadth/intensity tests",
+    # subtitle = "* breadth distribution; \u2020 intensity distribution; symbols shown only when raw p < 0.05 and BH-adjusted p \u2264 0.10",
+
+p_inset <- ggplot(inset_dat, aes(functional_category, breadth, color = functional_category)) +
+  geom_violin(fill = "grey90", color = "grey45", scale = "width", alpha = 0.95) +
+geom_jitter(width = 0.12, size = 0.9, alpha = 0.75, stroke = 0.2,
+              show.legend = FALSE) +
+geom_text(
+  data = star_df,
+  aes(x = functional_category, y = y),
+  label = "*",
+  inherit.aes = FALSE,
+  color = "black",
+  size = 10.0
+) +
+geom_text(
+  data = cross_df,
+  aes(x = functional_category, y = y),
+  label = "\u2020",
+  inherit.aes = FALSE,
+  color = "black",
+  size = 9.0
+) +
+  coord_flip(clip = "off") +
+  scale_color_manual(values = Category)+
+  scale_y_continuous(
+  limits = c(0, 0.25),
+  breaks = seq(0, 0.25, by = 0.05),
+  name = "Positive-site proportion across all genes"
+)+
+  labs(
+    x = NULL,
+    color = "Category"
+  ) +
+  theme_minimal(base_size = 9) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", size = 9),
+    plot.subtitle = element_text(size = 8),
+    axis.text.y = element_text(size = 7),
+    axis.text.x = element_text(size = 7),
+    legend.position = "none",
+    plot.margin = margin(4, 10, 4, 4)
+  )+inset_style()
+
+p_inset_fel <- p_inset +
+  theme(
+    plot.background = element_rect(fill = "white", color = "grey70", linewidth = 0.4),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.margin = margin(3, 3, 3, 3),
+    plot.title = element_text(size = 8, face = "bold"),
+    plot.subtitle = element_text(size = 6),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 6),
+    axis.text.x = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    legend.position = "none"
+  )
+
+pFEL_final <- pFEL_breadth + inset_element(
+  p_inset_fel,
+  left = 0.66,
+  right = 0.995,
+  bottom = 0.08,
+  top = 0.44,
+  align_to = "panel"
+)
+
+pFEL_final
+
+ggsave(file.path(output_dir,"Fig3FEL.C.tiff"),plot = pFEL_breadth, height = 8, width = 15)
+
+ggsave(file.path(output_dir,"Fig3FELinset.C.tiff"),plot = p_inset, height = 8, width = 15)
+
+fel_supp_table <- fel_gene %>%
+  filter(n_sig_pos_sites > 0) %>%
+  left_join(
+    fel_sites_gene %>%
+      filter(is_pos_site) %>%
+      inner_join(pathway_map, by = "gene_id") %>%
+      group_by(gene_id, functional_category) %>%
+      summarise(
+        sig_site_positions = paste(sort(unique(site)), collapse = ", "),
+        sig_site_omegas    = paste(round(omega[order(site)], 4), collapse = ", "),
+        sig_site_lrts      = paste(round(lrt[order(site)], 4), collapse = ", "),
+        sig_site_pvalues   = paste(signif(pvalue[order(site)], 4), collapse = ", "),
+        sig_site_padj      = paste(signif(p_adj[order(site)], 4), collapse = ", "),
+        .groups = "drop"
+      ),
+    by = c("gene_id", "functional_category")
+  ) %>%
+  transmute(
+    gene = gene_id,
+    functional_category,
+    avg_length = round(avg_length, 1),
+    gene_n_sites,
+    n_sig_pos_sites,
+    n_sig_neg_sites,
+    prop_sig_pos = round(prop_sig_pos, 4),
+    median_pos_omega = round(median_pos_omega, 4),
+    sig_site_positions,
+    sig_site_omegas,
+    sig_site_lrts,
+    sig_site_pvalues,
+    sig_site_padj
+  ) %>%
+  arrange(functional_category, desc(prop_sig_pos), desc(median_pos_omega))
+
+fel_supp_inset <- bind_rows(
+  breadth_test %>% mutate(test = "breadth"),
+  intensity_test %>% mutate(test = "intensity")
+) %>%
+  transmute(
+    functional_category, test,
+    n_path, n_rest,
+    med_path = round(med_path, 4),
+    med_rest = round(med_rest, 4),
+    p_raw = signif(p_raw, 4),
+    p_bh = signif(p_bh, 4),
+    sig_both
+  ) %>%
+  arrange(test, p_bh, p_raw)
+
+
+
+write.csv(breadth_test,file.path(output_dir, file="breadth_test_FEL.csv"))
+write.csv(intensity_test,file.path(output_dir, file = "intensity_test_FEL.csv"))
+write.csv(fel_supp_inset,file.path(output_dir, file = "fel_supp_inset.csv"))
+write.csv(fel_supp_table,file.path(output_dir, file = "fel_supp_main.csv"))
+
+
+
+
+```
+
+
+
+## FIGURE 3B: fubar
+
+```{r, fig 3 panel B}
+
+set.seed(100)
+
+fubar_pp_thresh <- 0.90
+top_n_per_pathway <- 5
+alpha_cut <- 0.10
+pos_thr <- 0.10
+
+tiny <- 1e-6
+omega_cap <- 100
+
+fubar_res <- read.csv("tfubar_summary.csv", stringsAsFactors = FALSE)
+
+#### original
+#### program,gene,branch,GTR,sites,alpha,beta,beta-alpha,Prob[alpha>beta],Prob[alpha<beta],BayesFactor[alpha<beta]
+
+
+#### let's adjust
+fubar_res <- rename(
+  fubar_res,
+  beta_minus_alpha = beta.alpha,
+  P_alphaGTbeta = Prob.alpha.beta.,
+  P_betaGTalpha = Prob.alpha.beta..1,
+  BayesFactor_betaGTalpha = BayesFactor.alpha.beta.
+)
+
+
+
+function_metadata <- read_csv("gene_sets_union.csv")
+
+## merges metadata to FUBAR data
+fubar_res <- merge(
+  fubar_res,
+  function_metadata,
+  by.x = "gene",
+  by.y = "symbol",
+  all.x = TRUE
+)
+
+fubar_res$branch <- gsub("\\|", "_", fubar_res$branch)
+
+gene_length <- read_tsv("gene_lengths.tsv") %>%
+  mutate(gene_id = toupper(gene_id))
+
+fubar_res <- merge(fubar_res, gene_length, by.x = "branch", by.y = "gene_id")
+
+## compute avg_length + number_of_sequences_num BEFORE dropping branch
+fubar_res <- fubar_res %>%
+  filter(!str_detect(branch, "Node|root")) %>%
+  group_by(gene) %>%
+  mutate(
+    avg_length = mean(seq_length, na.rm = TRUE),
+    number_of_sequences_num = n_distinct(branch) >= 5
+  ) %>%
+  ungroup() %>%
+  dplyr::select(-c(branch, fasta_file, GTR, seq_length)) %>%
+  unique()
+
+
+fubar_res <- filter_one2manyID(fubar_res, "gene")
+
+fubar_res <- exorcise(fubar_res, "gene")
+
+fubar_res <- fubar_res %>%
+  rename(functional_category = pathway_label)
+
+fubar_sites <- fubar_res %>%
+  mutate(
+    across(
+      c(
+        sites, alpha, beta, beta_minus_alpha,
+        P_alphaGTbeta, P_betaGTalpha, BayesFactor_betaGTalpha
+      ),
+      ~ {
+        x <- as.character(.x)
+        x <- str_remove_all(x, "^\\s*\\[|\\]\\s*$")
+        x <- str_replace_all(x, "\\s*'\\s*|\\s*\"\\s*", "")
+        str_trim(x)
+      }
+    )
+  ) %>%
+  separate_rows(
+    sites, alpha, beta, beta_minus_alpha,
+    P_alphaGTbeta, P_betaGTalpha, BayesFactor_betaGTalpha,
+    sep = ",\\s*", convert = FALSE
+  ) %>%
+  mutate(
+    site = as.integer(sites),
+    alpha = as.numeric(alpha),
+    beta = as.numeric(beta),
+    beta_minus_alpha2 = beta - alpha,
+    pp_pos = as.numeric(P_betaGTalpha),
+    pp_neg = as.numeric(P_alphaGTbeta),
+    bf_pos = as.numeric(BayesFactor_betaGTalpha),
+    avg_length = as.numeric(avg_length),
+    number_of_sequences_num = as.numeric(number_of_sequences_num),
+
+    ## explicit significant-site definitions used everywhere downstream
+    is_sig_pos_site = !is.na(pp_pos) & pp_pos >= fubar_pp_thresh & beta_minus_alpha2 > 1,
+    is_sig_neg_site = !is.na(pp_neg) & pp_neg >= fubar_pp_thresh & beta_minus_alpha2 < -1,
+
+    ## aliases for backward compatibility
+    is_pos_site = is_sig_pos_site,
+    is_neg_site = is_sig_neg_site,
+
+    omega_site = pmin(beta / pmax(alpha, tiny), omega_cap),
+    size_metric = pmax(pmin(beta / pmax(alpha, tiny), omega_cap), 1.01)
+  ) %>%
+  filter(!is.na(site), !is.na(functional_category))
+
+safe_first <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) NA_real_ else x[1]
+}
+
+## ==================================================
+## MAIN FUBAR PANEL
+## significant positive sites only
+## top 5 genes per pathway by breadth of significant positive sites
+## ==================================================
+
+fubar_gene_main <- fubar_sites %>%
+  filter(!is.na(functional_category), !is.na(site)) %>%
+  distinct(gene, functional_category, site, .keep_all = TRUE) %>%
+  group_by(gene, functional_category) %>%
+  summarise(
+    avg_length = safe_first(avg_length),
+    n_sites_reported = n_distinct(site),
+    n_sig_pos_sites = sum(is_sig_pos_site, na.rm = TRUE),
+    prop_sig_pos = ifelse(n_sites_reported > 0, n_sig_pos_sites / n_sites_reported, NA_real_),
+    sig_pos_omega_intensity = ifelse(
+      any(is_sig_pos_site),
+      median(omega_site[is_sig_pos_site], na.rm = TRUE),
+      NA_real_
+    ),
+    bar_length = ifelse(
+      !is.na(avg_length) & avg_length > 0,
+      avg_length,
+      as.numeric(n_sites_reported)
+    ),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(prop_sig_pos), is.finite(prop_sig_pos), n_sites_reported > 0)
+
+top_genes <- fubar_gene_main %>%
+  filter(n_sig_pos_sites > 0) %>%
+  group_by(functional_category) %>%
+  arrange(desc(prop_sig_pos), desc(sig_pos_omega_intensity), gene, .by_group = TRUE) %>%
+  mutate(plot_rank = row_number()) %>%
+  filter(plot_rank <= top_n_per_pathway) %>%
+  ungroup()
+
+gene_order <- top_genes %>%
+  arrange(functional_category, plot_rank, gene) %>%
+  pull(gene) %>%
+  unique()
+
+site_plot <- fubar_sites %>%
+  semi_join(top_genes %>% select(gene, functional_category), by = c("gene", "functional_category")) %>%
+  filter(is_sig_pos_site) %>%
+  mutate(gene = factor(gene, levels = rev(gene_order)))
+
+gene_bg <- top_genes %>%
+  transmute(
+    gene = factor(gene, levels = rev(gene_order)),
+    functional_category,
+    bar_length
+  )
+
+#title and subtitle
+    # title = "Significant pervasive positive-selection sites across top genes (FUBAR)",
+    # subtitle = paste0(
+    #   "Only sites with P(β>α) ≥ ", fubar_pp_thresh,
+    #   " and β−α > 1 are shown. Top 5 genes per pathway are ranked by the breadth of significant positive sites."
+    # )
+
+
+pFUBAR <- ggplot() +
+  geom_segment(
+    data = gene_bg,
+    aes(x = 1, xend = bar_length, y = gene, yend = gene),
+    color = "grey90",
+    linewidth = 2.2
+  ) +
+  geom_point(
+    data = site_plot,
+    aes(x = site, y = gene, size = size_metric),
+    color = "#D55E00",
+    alpha = 0.85
+  ) +
+    scale_color_manual(values = Category)+
+  facet_wrap(~ functional_category, scales = "free_y", ncol = 1) +
+  scale_size_continuous(name = "Positive-site ω (β/α)", range = c(1.2, 4.5)) +
+  labs(
+    x = "Codon position",
+    y = NULL,
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 7),
+    strip.text = element_text(face = "bold")
+  )
+ 
+pFUBAR <- pFUBAR + theme_bold
+
+## --------------------------------------------------
+## BREADTH / FREQUENCY INSET ONLY
+## --------------------------------------------------
+## --------------------------------------------------
+## INSET: pathway-level full-distribution tests
+## breadth = prop_sig_pos
+## intensity = sig_pos_omega_intensity
+## mark only if raw p < 0.05 AND BH-adjusted p <= 0.10
+## * = breadth
+## † = intensity
+## --------------------------------------------------
+
+fubar_gene_inset <- fubar_sites %>%
+  filter(!is.na(functional_category), !is.na(site)) %>%
+  distinct(gene, functional_category, site, .keep_all = TRUE) %>%
+  group_by(gene, functional_category) %>%
+  summarise(
+    n_sites_reported = n_distinct(site),
+    n_sig_pos_sites = sum(is_sig_pos_site, na.rm = TRUE),
+    avg_length = safe_first(avg_length),
+    prop_sig_pos = ifelse(n_sites_reported > 0, n_sig_pos_sites / n_sites_reported, NA_real_),
+    sig_pos_omega_intensity = ifelse(
+      any(is_sig_pos_site),
+      median(omega_site[is_sig_pos_site], na.rm = TRUE),
+      NA_real_
+    ),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(prop_sig_pos), is.finite(prop_sig_pos), n_sites_reported > 0)
+
+inset_dat <- fubar_gene_inset %>%
+  transmute(
+    gene,
+  functional_category= as.character(functional_category),
+    breadth = prop_sig_pos,
+    intensity = sig_pos_omega_intensity
+  )
+
+path_order <- inset_dat %>%
+  group_by(functional_category) %>%
+  summarise(med = median(breadth, na.rm = TRUE), .groups = "drop") %>%
+  arrange(med) %>%
+  pull(functional_category)
+
+inset_dat$functional_category <- factor(inset_dat$functional_category, levels = path_order)
+
+wilcox_vs_rest <- function(dat, value_col) {
+  levs <- levels(dat$functional_category)
+
+  bind_rows(lapply(levs, function(pw) {
+    x <- dat %>% filter(functional_category == pw) %>% pull(.data[[value_col]])
+    y <- dat %>% filter(functional_category != pw) %>% pull(.data[[value_col]])
+
+    x <- x[is.finite(x)]
+    y <- y[is.finite(y)]
+
+    p_raw <- if (length(x) >= 2 && length(y) >= 2) {
+      tryCatch(
+        wilcox.test(x, y, exact = FALSE)$p.value,
+        error = function(e) NA_real_
+      )
+    } else {
+      NA_real_
+    }
+
+    tibble(
+    functional_category= factor(pw, levels = levs),
+      n_path = length(x),
+      n_rest = length(y),
+      med_path = ifelse(length(x) > 0, median(x, na.rm = TRUE), NA_real_),
+      med_rest = ifelse(length(y) > 0, median(y, na.rm = TRUE), NA_real_),
+      p_raw = p_raw
+    )
+  })) %>%
+    mutate(
+      p_bh = p.adjust(p_raw, method = "BH"),
+      sig_both = !is.na(p_raw) & !is.na(p_bh) & p_raw < 0.05 & p_bh <= 0.10
+    )
+}
+
+breadth_test <- wilcox_vs_rest(inset_dat, "breadth")
+intensity_test <- wilcox_vs_rest(inset_dat, "intensity")
+
+pad <- max(100 * inset_dat$breadth, na.rm = TRUE) * 0.08 + 0.5
+
+star_df <- inset_dat %>%
+  group_by(functional_category) %>%
+  summarise(y = max(100 * breadth, na.rm = TRUE) + pad, .groups = "drop") %>%
+  left_join(breadth_test %>% select(functional_category, p_raw, p_bh, sig_both), by = "functional_category") %>%
+  filter(sig_both)
+
+cross_df <- inset_dat %>%
+  group_by(functional_category) %>%
+  summarise(y = max(100 * breadth, na.rm = TRUE) + 2 * pad, .groups = "drop") %>%
+  left_join(intensity_test %>% select(functional_category, p_raw, p_bh, sig_both), by = "functional_category") %>%
+  filter(sig_both)
+
+upper_lim <- max(c(100 * inset_dat$breadth, star_df$y, cross_df$y, 1), na.rm = TRUE)
+
+inset_dat$functional_category <- factor(inset_dat$functional_category, levels = Category_order)
+star_df$functional_category  <- factor(star_df$functional_category,  levels = Category_order)
+cross_df$functional_category <- factor(cross_df$functional_category, levels = Category_order)
+
+
+#title and subtitle 
+    # title = "Distributions of significant positive-selection breadth by pathway",
+    # subtitle = "* breadth distribution; \u2020 intensity distribution; symbols shown only when raw p < 0.05 and BH-adjusted p \u2264 0.10",
+
+p_inset <- ggplot(inset_dat, aes(functional_category, 100 * breadth, color = functional_category)) +
+  geom_violin(fill = "grey88", color = "grey40", scale = "width", alpha = 0.9) +
+  geom_boxplot(
+    width = 0.18,
+    outlier.shape = NA,
+    fill = NA,
+    color = "grey20",
+    linewidth = 0.35
+  ) +
+  geom_jitter(width = 0.12, size = 0.9, alpha = 0.75, stroke = 0.2,
+              show.legend = FALSE) +
+  geom_text(
+    data = star_df,
+    aes(functional_category, y),
+    label = "*",
+    inherit.aes = FALSE,
+    color = "black",
+    size = 10.0
+  ) +
+  geom_text(
+    data = cross_df,
+    aes(functional_category, y),
+    label = "\u2020",
+    inherit.aes = FALSE,
+    color = "black",
+    size = 9.0
+  ) +
+  coord_flip(clip = "off") +
+  scale_color_manual(values = Category) +
+  scale_y_continuous(
+    name = "Significant positive sites (% of evaluated codon sites)",
+    limits = c(0, upper_lim),
+    expand = expansion(mult = c(0.02, 0.18))
+  ) +
+  labs(
+    x = NULL,
+    color = "Category"
+  ) +
+  theme_minimal(base_size = 8) +
+  theme(
+    plot.title = element_text(size = 9, face = "bold"),
+    plot.subtitle = element_text(size = 7),
+    axis.text.y = element_text(size = 6),
+    axis.text.x = element_text(size = 6),
+    plot.margin = margin(4, 14, 4, 4),
+    legend.position = "none"
+  ) +inset_style()
+
+pFUBAR_final <- pFUBAR + inset_element(
+  p_inset,
+  left = 0.58, right = 0.98,
+  bottom = 0.61, top = 0.90,
+  align_to = "panel"
+)
+
+pFUBAR_final
+
+### SUPPL TABLEs
+fubar_supp_table <- fubar_gene_main %>%
+  filter(n_sig_pos_sites > 0) %>%
+  left_join(
+    fubar_sites %>%
+      filter(is_sig_pos_site) %>%
+      group_by(gene, functional_category) %>%
+      summarise(
+        number_of_sequences = safe_first(number_of_sequences_num),
+        sig_site_positions = paste(sort(unique(site)), collapse = ", "),
+        sig_site_alpha     = paste(round(alpha[order(site)], 4), collapse = ", "),
+        sig_site_beta      = paste(round(beta[order(site)], 4), collapse = ", "),
+        sig_site_omegas    = paste(round(omega_site[order(site)], 4), collapse = ", "),
+        sig_site_pp_pos    = paste(round(pp_pos[order(site)], 4), collapse = ", "),
+        sig_site_bf_pos    = paste(round(bf_pos[order(site)], 4), collapse = ", "),
+        .groups = "drop"
+      ),
+    by = c("gene", "functional_category")
+  ) %>%
+  left_join(
+    fubar_sites %>%
+      group_by(gene, functional_category) %>%
+      summarise(
+        n_sig_neg_sites = sum(is_sig_neg_site, na.rm = TRUE),
+        .groups = "drop"
+      ),
+    by = c("gene", "functional_category")
+  ) %>%
+  transmute(
+    gene, functional_category,
+    avg_length = round(avg_length, 1),
+    number_of_sequences,
+    n_sites_reported,
+    n_sig_pos_sites,
+    n_sig_neg_sites,
+    prop_sig_pos = round(prop_sig_pos, 4),
+    sig_pos_omega_intensity = round(sig_pos_omega_intensity, 4),
+    sig_site_positions,
+    sig_site_alpha,
+    sig_site_beta,
+    sig_site_omegas,
+    sig_site_pp_pos,
+    sig_site_bf_pos
+  ) %>%
+  arrange(functional_category, desc(prop_sig_pos), desc(sig_pos_omega_intensity))
+
+fubar_supp_inset <- bind_rows(
+  breadth_test %>% mutate(test = "breadth"),
+  intensity_test %>% mutate(test = "intensity")
+) %>%
+  transmute(
+    functional_category, test,
+    n_path, n_rest,
+    med_path = round(med_path, 4),
+    med_rest = round(med_rest, 4),
+    p_raw = signif(p_raw, 4),
+    p_bh = signif(p_bh, 4),
+    sig_both
+  ) %>%
+  arrange(test, p_bh, p_raw)
+
+ggsave(file.path(output_dir,"Fig3FUBAR.B.tiff"),plot = pFUBAR, height = 8, width = 15)
+
+
+ggsave(file.path(output_dir,"Fig3FUBARinset.B.tiff"),plot = p_inset, height = 8, width = 15)
+
+# write.csv(file.path(output_dir,full_gene_data_for_plotted_pathways, file = "full_gene_data_for_plotted_pathways.csv")
+
+
+write.csv(breadth_test,file.path(output_dir, file="breadth_test_FUBAR.csv"))
+write.csv(intensity_test,file.path(output_dir, file = "intensity_test_FUBAR.csv"))
+write.csv(fubar_supp_inset,file.path(output_dir,file = "fubar_supp_inset.csv"))
+write.csv(fubar_supp_table,file.path(output_dir, file = "fubar_supp_table.csv"))
+
+
+```
+
+
+
+## sure UGT1s are postively selected... we already knew that, but what about the places where pathways overlap... we know they do in this dataset, and it's also part of the reason we chose some of these genes by path in the first place anyways
+
+## now the results here show that some of the biggest significant overlap is between pathways where bile acid path features are major partners...
+
+## retinoid path where UGT1s are taking center stage of course we show as the driver, but we also show significant overlap between this path and fatty acid metabolism...
+
+## many of the top 10 drivers are not reported as positively selected in the primate literature yet with the exception of CD36,OSBPL5,LPL---- the other 7 are generally under-reported LRPAP1, STARD3, ABCB11, LCAT, and also not a strong primate-specific one for SCARB1, LIPA, or ABCG8... and none of these are UGT genes already canonically discussed in the primate lit
+
+```{r}
+
+## =========================================================
+## BRIDGE / PATHWAY-PAIR OVERLAP ANALYSIS
+## - tests whether specific pathway pairs share more
+##   selection-supported genes than expected
+## - BH-corrects permutation p-values across all pathway pairs
+## - extracts the actual genes driving significant pairs
+## =========================================================
+
+set.seed(100)
+
+## -----------------------------
+## user-tunable settings
+## -----------------------------
+min_methods_support <- 2   # gene must show positive-site support in at least this many methods
+pair_alpha_bh <- 0.10      # BH cutoff for declaring a significant pathway pair
+n_perm <- 5000             # increase if needed
+
+## -----------------------------
+## helper
+## -----------------------------
+collapse_unique_chr <- function(x, sep = " | ") {
+  x <- sort(unique(as.character(x[!is.na(x)])))
+  if (length(x) == 0) NA_character_ else paste(x, collapse = sep)
+}
+
+## -----------------------------
+## 1) pathway membership across methods
+##    keep all observed gene-pathway memberships
+## -----------------------------
+pathway_membership <- bind_rows(
+  fubar_gene_main %>%
+    transmute(
+      gene = as.character(gene),
+    functional_category= as.character(functional_category)
+    ),
+  fel_gene %>%
+    transmute(
+      gene = as.character(gene_id),
+    functional_category= as.character(functional_category)
+    ),
+  meme_gene_main %>%
+    transmute(
+      gene = as.character(gene),
+    functional_category= as.character(functional_category)
+    )
+) %>%
+  filter(!is.na(gene), !is.na(functional_category), gene != "", functional_category != "") %>%
+  distinct()
+
+
+
+## -----------------------------
+## 2) method-level support
+##    "support" = at least one positive site in that method
+## -----------------------------
+fubar_support <- fubar_gene_main %>%
+  group_by(gene) %>%
+  summarise(
+    has_fubar = any(n_sig_pos_sites > 0, na.rm = TRUE),
+    fubar_n_sig = max(n_sig_pos_sites, na.rm = TRUE),
+    fubar_breadth = max(prop_sig_pos, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+fel_support <- fel_gene %>%
+  group_by(gene_id) %>%
+  summarise(
+    has_fel = any(n_sig_pos_sites > 0, na.rm = TRUE),
+    fel_n_sig = max(n_sig_pos_sites, na.rm = TRUE),
+    fel_breadth = max(prop_sig_pos, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  rename(gene = gene_id)
+
+meme_support <- meme_gene_main %>%
+  group_by(gene) %>%
+  summarise(
+    has_meme = any(n_sig_pos_sites > 0, na.rm = TRUE),
+    meme_n_sig = max(n_sig_pos_sites, na.rm = TRUE),
+    meme_breadth = max(prop_sig_pos, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+gene_support <- pathway_membership %>%
+  distinct(gene) %>%
+  left_join(fubar_support, by = "gene") %>%
+  left_join(fel_support,   by = "gene") %>%
+  left_join(meme_support,  by = "gene") %>%
+  mutate(
+    has_fubar = coalesce(has_fubar, FALSE),
+    has_fel   = coalesce(has_fel, FALSE),
+    has_meme  = coalesce(has_meme, FALSE),
+    fubar_n_sig = coalesce(fubar_n_sig, 0),
+    fel_n_sig   = coalesce(fel_n_sig, 0),
+    meme_n_sig  = coalesce(meme_n_sig, 0),
+    support_n = rowSums(across(c(has_fubar, has_fel, has_meme))),
+    support_methods = pmap_chr(
+      list(has_fubar, has_fel, has_meme),
+      ~ {
+        out <- c()
+        if (..1) out <- c(out, "FUBAR")
+        if (..2) out <- c(out, "FEL")
+        if (..3) out <- c(out, "MEME")
+        if (length(out) == 0) NA_character_ else paste(out, collapse = " | ")
+      }
+    )
+  )
+
+## -----------------------------
+## 3) restrict to genes with recurrent support
+## -----------------------------
+supported_genes <- gene_support %>%
+  filter(support_n >= min_methods_support)
+
+pm_sup <- pathway_membership %>%
+  semi_join(supported_genes, by = "gene") %>%
+  distinct()
+
+## gene-level pathway degree among supported genes
+gene_degree <- pm_sup %>%
+  count(gene, name = "n_pathways") %>%
+  arrange(desc(n_pathways), gene)
+
+## -----------------------------
+## 4) enumerate pathway pairs
+## -----------------------------
+path_levels <- sort(unique(pm_sup$functional_category))
+
+if (length(path_levels) < 2) {
+  stop("Fewer than 2 pathway labels remain after support filtering; no pairwise test can be run.")
+}
+
+path_pairs <- as_tibble(t(combn(path_levels, 2)), .name_repair = "minimal")
+colnames(path_pairs) <- c("category1", "category2")
+
+## -----------------------------
+## 5) observed overlap counts
+##    count genes that belong to BOTH pathways in the pair
+## -----------------------------
+pair_overlap_results <- path_pairs %>%
+  rowwise() %>%
+  mutate(
+    obs = pm_sup %>%
+      group_by(gene) %>%
+      summarise(
+        has1 = any(functional_category == category1),
+        has2 = any(functional_category == category2),
+        .groups = "drop"
+      ) %>%
+      filter(has1, has2) %>%
+      nrow()
+  ) %>%
+  ungroup()
+
+## -----------------------------
+## 6) degree-preserving permutation null
+##    preserves how many pathway labels each gene has
+## -----------------------------
+degree_tbl <- pm_sup %>%
+  count(gene, name = "deg")
+
+perm_counts <- replicate(n_perm, {
+  perm_pm <- degree_tbl %>%
+    rowwise() %>%
+    mutate(
+    functional_category= list(sample(path_levels, size = deg, replace = FALSE))
+    ) %>%
+    unnest(functional_category) %>%
+    ungroup()
+
+  path_pairs %>%
+    rowwise() %>%
+    mutate(
+      n_shared = perm_pm %>%
+        group_by(gene) %>%
+        summarise(
+          has1 = any(functional_category == category1),
+          has2 = any(functional_category == category2),
+          .groups = "drop"
+        ) %>%
+        filter(has1, has2) %>%
+        nrow()
+    ) %>%
+    pull(n_shared)
+})
+
+## -----------------------------
+## 7) permutation p-values + BH correction
+## -----------------------------
+pair_overlap_results <- pair_overlap_results %>%
+  mutate(
+    p_perm = vapply(seq_len(n()), function(i) {
+      mean(perm_counts[i, ] >= obs[i])
+    }, numeric(1)),
+    p_bh = p.adjust(p_perm, method = "BH"),
+    sig_bh = p_bh <= pair_alpha_bh
+  ) %>%
+  arrange(p_bh, desc(obs), category1, category2)
+
+pair_overlap_results
+
+## -----------------------------
+## 8) extract the actual genes driving each pair
+##    for ALL pairs
+## -----------------------------
+pair_driver_genes <- pair_overlap_results %>%
+  select(category1, category2, obs, p_perm, p_bh, sig_bh) %>%
+  rowwise() %>%
+  do({
+    pair_row <- .
+    driver_tbl <- pm_sup %>%
+      group_by(gene) %>%
+      summarise(
+        has1 = any(functional_category == pair_row$category1),
+        has2 = any(functional_category == pair_row$category2),
+        pathway_list = collapse_unique_chr(functional_category),
+        .groups = "drop"
+      ) %>%
+      filter(has1, has2) %>%
+      select(-has1, -has2) %>%
+      left_join(supported_genes, by = "gene") %>%
+      left_join(gene_degree, by = "gene") %>%
+      mutate(
+        category1 = pair_row$category1,
+        category2 = pair_row$category2,
+        obs = pair_row$obs,
+        p_perm = pair_row$p_perm,
+        p_bh = pair_row$p_bh,
+        sig_bh = pair_row$sig_bh
+      ) %>%
+      arrange(
+        desc(support_n),
+        desc(n_pathways),
+        desc(fel_n_sig),
+        desc(fubar_n_sig),
+        desc(meme_n_sig),
+        gene
+      )
+
+    driver_tbl
+  }) %>%
+  ungroup()
+
+pair_driver_genes
+
+## -----------------------------
+## 9) keep only significant pairs
+## -----------------------------
+significant_pairs <- pair_overlap_results %>%
+  filter(sig_bh)
+
+significant_pair_driver_genes <- pair_driver_genes %>%
+  semi_join(significant_pairs, by = c("category1", "category2"))
+
+significant_pair_driver_genes
+
+
+## =========================================================
+## 10) rank bridge genes within each significant pair
+##     using observed quantities only
+##
+##     Formal significance remains at the pathway-pair level:
+##       - pair_overlap_results$p_bh
+##
+##     Gene ordering within each significant pair is descriptive:
+##       1) support_n
+##       2) median FUBAR/FEL positive-site breadth
+##       3) n_pathways
+##       4) FEL / FUBAR / MEME significant-site counts
+## =========================================================
+
+significant_pair_driver_genes_ranked <- significant_pair_driver_genes %>%
+  rowwise() %>%
+  mutate(
+    median_breadth_ff = {
+      x <- c(
+        if (isTRUE(has_fubar)) fubar_breadth else NA_real_,
+        if (isTRUE(has_fel))   fel_breadth   else NA_real_
+      )
+      x <- x[is.finite(x)]
+      if (length(x) == 0) NA_real_ else median(x)
+    }
+  ) %>%
+  ungroup() %>%
+  group_by(category1, category2) %>%
+  arrange(
+    desc(support_n),
+    desc(median_breadth_ff),
+    desc(n_pathways),
+    desc(fel_n_sig),
+    desc(fubar_n_sig),
+    desc(meme_n_sig),
+    gene,
+    .by_group = TRUE
+  ) %>%
+  mutate(driver_rank_within_pair = row_number()) %>%
+  ungroup()
+
+significant_pair_driver_genes_ranked
+
+## =========================================================
+## 11) compact summary:
+##     one row per significant pair + ranked gene list
+## =========================================================
+
+significant_pair_driver_summary <- significant_pair_driver_genes_ranked %>%
+  group_by(category1, category2, obs, p_perm, p_bh) %>%
+  summarise(
+    n_driver_genes = n(),
+    driver_genes = paste(gene, collapse = ", "),
+    top_driver_genes = paste(gene[order(driver_rank_within_pair)][1:min(10, n())], collapse = ", "),
+    support_methods_seen = collapse_unique_chr(unlist(strsplit(
+      paste(support_methods[!is.na(support_methods)], collapse = " | "),
+      " \\| "
+    ))),
+    .groups = "drop"
+  ) %>%
+  arrange(p_bh, desc(obs), category1, category2)
+
+significant_pair_driver_summary
+
+## =========================================================
+## 12) quick views:
+##     top ranked bridge genes + high-breadth candidates
+## =========================================================
+
+label_breadth_cut <- 0.10
+n_label_per_pair <- 8
+
+top_drivers_per_significant_pair <- significant_pair_driver_genes_ranked %>%
+  filter(driver_rank_within_pair <= 10) %>%
+  mutate(
+    high_breadth_candidate = median_breadth_ff > label_breadth_cut
+  ) %>%
+  select(
+    category1, category2, driver_rank_within_pair,
+    gene, support_n, support_methods, n_pathways, pathway_list,
+    median_breadth_ff, high_breadth_candidate,
+    fubar_n_sig, fel_n_sig, meme_n_sig,
+    fubar_breadth, fel_breadth, meme_breadth,
+    p_bh
+  ) %>%
+  arrange(p_bh, category1, category2, driver_rank_within_pair)
+
+top_drivers_per_significant_pair %>% View()
+
+## =========================================================
+## 13) reviewer-facing bridge figure
+##     - only BH-significant pathway pairs are shown
+##     - only genes with support in >= min_methods_support methods
+##     - x-axis is descriptive median FUBAR/FEL breadth
+##     - fill shows number of methods supporting positive selection
+##     - labels show top-ranked genes and any genes with
+##       median_breadth_ff > 10%
+## =========================================================
+
+pair_label_df <- significant_pairs %>%
+  mutate(
+    pair_label = paste0(
+      category1, " \u2194 ", category2,
+      "\nobs = ", obs,
+      ", BH-adjusted p = ", formatC(p_bh, format = "f", digits = 3)
+    )
+  ) %>%
+  select(category1, category2, pair_label)
+
+bridge_fig_df <- significant_pair_driver_genes_ranked %>%
+  left_join(pair_label_df, by = c("category1", "category2")) %>%
+  mutate(
+    support_n = factor(support_n, levels = sort(unique(support_n))),
+    high_breadth_flag = median_breadth_ff > label_breadth_cut,
+    top_flag = driver_rank_within_pair <= n_label_per_pair,
+    label_flag = top_flag | high_breadth_flag,
+    label_reason = case_when(
+      top_flag & high_breadth_flag ~ "top_rank_and_high_breadth",
+      top_flag ~ "top_rank",
+      high_breadth_flag ~ "high_breadth_only",
+      TRUE ~ "unlabeled"
+    )
+  ) %>%
+  arrange(p_bh, category1, category2, driver_rank_within_pair) %>%
+  mutate(
+    pair_gene = paste(pair_label, gene, sep = "___"),
+    pair_gene = factor(pair_gene, levels = rev(unique(pair_gene)))
+  )
+
+x_max_bridge <- max(bridge_fig_df$median_breadth_ff, na.rm = TRUE)
+if (!is.finite(x_max_bridge) || x_max_bridge <= 0) {
+  x_max_bridge <- 0.05
+}
+
+#title and subtitle (caption maybe)
+
+    # title = "Bridge genes contributing to significant pathway-pair overlaps",
+    # subtitle = paste0(
+    #   "Only pathway pairs with BH-adjusted permutation significance are shown. ",
+    #   "All displayed genes were supported in >= ", min_methods_support,
+    #   " methods and annotated to both pathways in the pair. ",
+    #   "Within each pair, genes are ordered by tool support first, then by median FUBAR/FEL breadth. ",
+    #   "Top ", n_label_per_pair, " genes per pair are labeled, and any additional genes with median FUBAR/FEL breadth > ",
+    #   scales::percent(label_breadth_cut, accuracy = 1),
+    #   " are also labeled."
+    # ),
+
+
+
+theme_bold1 <-  theme_minimal(base_size = 11, base_family = "sans") +
+  theme(
+    # ---- Panel ----
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+
+    # ---- Axis titles ----
+    axis.title.x = element_text(
+      size = 16, face = "bold",
+      margin = margin(t = 10)
+    ),
+    axis.title.y = element_blank(),
+    
+    # ---- Axis text  ----
+    axis.text.x = element_text(
+      size = 14, face = "bold", color = "black",
+      margin = margin(t = 4)
+    ),
+    axis.text.y = element_text(size = 12, face = "bold", color = "black"
+    ),
+    # ---- Axis lines ----
+    axis.line = element_line(size = 0.9, color = "black"),
+
+    # ---- Facet strips ----
+    strip.text = element_text(
+      size = 16, face = "bold",
+      margin = margin(t = 4, b = 4)
+    ),
+    strip.background = element_rect(
+      fill = "grey94",
+      color = "grey55",
+      linewidth = 0.7
+    ),
+
+    # ---- Legend ----
+    legend.position = "none",
+    legend.title = element_blank(),
+    legend.text  = element_text(),
+    
+    # ---- Plot title & caption ----
+    plot.title = element_text(
+      size = 18, face = "bold", hjust = 0.5,
+      margin = margin(b = 10)
+    ),
+    plot.caption = element_text(
+      size = 8.5, hjust = 0,
+      margin = margin(t = 10)
+    )
+)
+
+
+
+p_bridge_clean <- ggplot(
+  bridge_fig_df,
+  aes(x = median_breadth_ff, y = pair_gene)
+) +
+  geom_segment(
+    aes(x = 0, xend = median_breadth_ff, yend = pair_gene),
+    color = "grey88",
+    linewidth = 0.6
+  ) +
+  geom_point(
+    aes(fill = support_n, alpha = label_flag),
+    shape = 21,
+    size = 3.3,
+    color = "black",
+    stroke = 0.3
+  ) +
+geom_point(
+  aes(fill = support_n, alpha = label_flag),
+  shape = 21,
+  size = 3.3,
+  color = "black",
+  stroke = 0.3
+) +
+# ggrepel::geom_text_repel(
+#   data = bridge_fig_df %>% filter(!label_flag),
+#   aes(
+#     label = gene),
+#   size = 4.0,
+#   color = "black",
+#   segment.color = "grey20",
+#   segment.size = 0.3,
+#   force = 0.25,                
+#   max.overlaps = Inf,
+#   direction = "y",
+#   hjust = 0,
+#   nudge_x = x_max_bridge * 0.25) +
+ggrepel::geom_text_repel(
+  data = bridge_fig_df %>% filter(label_flag),
+  aes(label = gene),
+  size = 5,
+  color = "grey20",
+  segment.color = "grey35",
+  segment.size = 0.4,
+  direction = "y",
+  hjust = 0,
+  nudge_x = x_max_bridge * 0.025,
+  box.padding = 0.2,
+  point.padding = 0.15,
+  max.overlaps = Inf,
+  min.segment.length = 0
+)+
+  facet_wrap(~ pair_label, scales = "free_y", ncol = 1) +
+scale_y_discrete(
+  labels = function(x) sub("^.*___", "", x)
+) +
+  scale_x_continuous(
+    limits = c(0, x_max_bridge * 1.08),
+    expand = expansion(mult = c(0.01, 0.08))
+  ) +
+  scale_fill_grey(
+    start = 0.75,
+    end = 0.25,
+    name = "Methods supporting\npositive selection"
+  ) +
+  scale_alpha_manual(
+    values = c("TRUE" = 1, "FALSE" = 0.35),
+    guide = "none"
+  ) +
+  labs(
+    x = "Median gene-level positive-site breadth across FUBAR and FEL\n(proportion of codon sites inferred as positively selected; descriptive ordering only)",
+    y = NULL,
+    # title = "Bridge genes contributing to significant pathway-pair overlaps",
+    # subtitle = paste0(
+    #   "Only pathway pairs with BH-adjusted permutation significance are shown. ",
+    #   "All displayed genes were supported in >= ", min_methods_support,
+    #   " methods and annotated to both pathways in the pair. ",
+    #   "Within each pair, genes are ordered by tool support first, then by median FUBAR/FEL breadth. ",
+    #   "Top ", n_label_per_pair, " genes per pair are labeled, and any additional genes with median FUBAR/FEL breadth > ",
+    #   scales::percent(label_breadth_cut, accuracy = 1),
+    #   " are also labeled."
+    # ),
+    # caption = paste0(
+    #   "Pair-level significance comes from the BH-corrected permutation test; the x-axis is a descriptive gene-ordering quantity, not a significance threshold. ",
+    #   "The >",
+    #   scales::percent(label_breadth_cut, accuracy = 1),
+    #   " label rule is used only to highlight candidate genes for literature follow-up."
+    # )
+  ) +
+  theme_minimal(base_size = 11
+  ) 
+
+p_bridge_clean
+
+p_bridge_clean <- p_bridge_clean + theme_bold1
+
+p_bridge_clean
+
+ggsave(file.path(output_dir,"supple_lollipop.tiff"),plot = p_bridge_clean, height = 12, width = 18)
+
+bridge_fig_df$pair_label
+
+#subsets for plotting individually
+
+bile_fatty_df <- bridge_fig_df %>%
+  filter(pair_label == "Bile acid biosynthesis & metabolism ↔ Fatty acid & cholesterol metabolism\nobs = 31, BH-adjusted p = 0.000")
+
+bile_retinoid_df <- bridge_fig_df %>%
+  filter(pair_label == "Bile acid biosynthesis & metabolism ↔ Retinoid / vitamin A metabolism\nobs = 17, BH-adjusted p = 0.082")
+
+glycine_df <- bridge_fig_df %>%
+  filter(pair_label == "Glycine metabolism ↔ Taurine and cysteine metabolism\nobs = 12, BH-adjusted p = 0.038")
+
+
+#new theme 
+
+
+theme_bold2 <-  theme_minimal(base_size = 11, base_family = "sans") +
+  theme(
+    # ---- Panel ----
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+
+    # ---- Axis titles ----
+    axis.title.x = element_blank(
+    ),
+    axis.title.y = element_blank(),
+    
+    # ---- Axis text  ----
+    axis.text.x = element_text(
+      size = 18, face = "bold", color = "black"
+    ),
+    axis.text.y = element_text(size = 15, face = "bold", color = "black"
+    ),
+    # ---- Axis lines ----
+    axis.line = element_line(size = 0.9, color = "black"),
+
+    # ---- Facet strips ----
+    strip.text = element_text(
+      size = 24, face = "bold",
+      margin = margin(t = 4, b = 4)
+    ),
+    strip.background = element_rect(
+      fill = "grey94",
+      color = "grey55",
+      linewidth = 0.7
+    ),
+
+    # ---- Legend ----
+    legend.position = "none",
+    legend.title = element_blank(),
+    legend.text  = element_text(),
+    
+    # ---- Plot title & caption ----
+    plot.title = element_text(
+      size = 18, face = "bold", hjust = 0.5,
+      margin = margin(b = 10)
+    ),
+    plot.caption = element_text(
+      size = 8.5, hjust = 0,
+      margin = margin(t = 10)
+    )
+)
+
+
+theme_bold3 <-  theme_minimal(base_size = 11, base_family = "sans") +
+  theme(
+    # ---- Panel ----
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+
+    # ---- Axis titles ----
+    axis.title.x = element_text(
+      size = 24, face = "bold"
+    ),
+    axis.title.y = element_blank(),
+    
+    # ---- Axis text  ----
+    axis.text.x = element_text(
+      size = 18, face = "bold", color = "black"
+    ),
+    axis.text.y = element_text(size = 15, face = "bold", color = "black"
+    ),
+    # ---- Axis lines ----
+    axis.line = element_line(size = 0.9, color = "black"),
+
+    # ---- Facet strips ----
+    strip.text = element_text(
+      size = 24, face = "bold",
+      margin = margin(t = 4, b = 4)
+    ),
+    strip.background = element_rect(
+      fill = "grey94",
+      color = "grey55",
+      linewidth = 0.7
+    ),
+
+    # ---- Legend ----
+    legend.position = "none",
+    legend.title = element_blank(),
+    legend.text  = element_text(),
+    
+    # ---- Plot title & caption ----
+    plot.title = element_text(
+      size = 18, face = "bold", hjust = 0.5,
+      margin = margin(b = 10)
+    ),
+    plot.caption = element_text(
+      size = 8.5, hjust = 0,
+      margin = margin(t = 10)
+    )
+)
+  
+  
+#plot
+
+p_bridge_BileFatty <- ggplot(
+  bile_fatty_df,
+  aes(x = median_breadth_ff, y = pair_gene)
+) +
+  geom_segment(
+    aes(x = 0, xend = median_breadth_ff, yend = pair_gene),
+    color = "grey88",
+    linewidth = 1.6
+  ) +
+  geom_point(
+    aes(fill = support_n, alpha = label_flag),
+    shape = 21,
+    size = 4,
+    color = "black",
+    stroke = 0.3
+  ) +
+geom_point(
+  aes(fill = support_n, alpha = label_flag),
+  shape = 21,
+  size = 4,
+  color = "black",
+  stroke = 0.3
+) +
+# ggrepel::geom_text_repel(
+#   data = bridge_fig_df %>% filter(!label_flag),
+#   aes(
+#     label = gene),
+#   size = 4.0,
+#   color = "black",
+#   segment.color = "grey20",
+#   segment.size = 0.3,
+#   force = 0.25,                
+#   max.overlaps = Inf,
+#   direction = "y",
+#   hjust = 0,
+#   nudge_x = x_max_bridge * 0.25) +
+ggrepel::geom_text_repel(
+  data = bile_fatty_df %>% filter(label_flag),
+  aes(label = gene),
+  size = 6,
+  color = "grey20",
+  segment.color = "grey35",
+  segment.size = 0.4,
+  direction = "y",
+  hjust = 0,
+  nudge_x = x_max_bridge * 0.025,
+  box.padding = 0.2,
+  point.padding = 0.15,
+  max.overlaps = Inf,
+  min.segment.length = 0
+)+
+  facet_wrap(~ pair_label, scales = "free_y", ncol = 1, labeller = labeller(
+    pair_label = function(x) sub("\n.*$", "", x)
+  )) +
+scale_y_discrete(
+  labels = function(x) sub("^.*___", "", x)
+) +
+  scale_x_continuous(
+    limits = c(0, x_max_bridge * 1.08),
+    expand = expansion(mult = c(0.01, 0.08))
+  ) +
+  scale_fill_grey(
+    start = 0.75,
+    end = 0.25,
+    name = "Methods supporting\npositive selection"
+  ) +
+  scale_alpha_manual(
+    values = c("TRUE" = 1, "FALSE" = 0.35),
+    guide = "none"
+  ) +
+  labs(
+    # x = "Median gene-level positive-site breadth across FUBAR and FEL\n(proportion of codon sites inferred as positively selected; descriptive ordering only)",
+    # y = NULL,
+    # title = "Bridge genes contributing to significant pathway-pair overlaps",
+    # subtitle = paste0(
+    #   "Only pathway pairs with BH-adjusted permutation significance are shown. ",
+    #   "All displayed genes were supported in >= ", min_methods_support,
+    #   " methods and annotated to both pathways in the pair. ",
+    #   "Within each pair, genes are ordered by tool support first, then by median FUBAR/FEL breadth. ",
+    #   "Top ", n_label_per_pair, " genes per pair are labeled, and any additional genes with median FUBAR/FEL breadth > ",
+    #   scales::percent(label_breadth_cut, accuracy = 1),
+    #   " are also labeled."
+    # ),
+    # caption = paste0(
+    #   "Pair-level significance comes from the BH-corrected permutation test; the x-axis is a descriptive gene-ordering quantity, not a significance threshold. ",
+    #   "The >",
+    #   scales::percent(label_breadth_cut, accuracy = 1),
+    #   " label rule is used only to highlight candidate genes for literature follow-up."
+    # )
+  ) +
+  theme_minimal(base_size = 11
+  ) 
+
+p_bridge_BileFatty
+
+p_bridge_BileFatty <- p_bridge_BileFatty + theme_bold2
+
+p_bridge_BileFatty
+
+ggsave(file.path(output_dir,"BILEFattysupple_lollipop.tiff"),plot = p_bridge_BileFatty, height = 8, width = 18)
+
+
+
+p_bridge_Bile_retinoid <- ggplot(
+  bile_retinoid_df,
+  aes(x = median_breadth_ff, y = pair_gene)
+) +
+  geom_segment(
+    aes(x = 0, xend = median_breadth_ff, yend = pair_gene),
+    color = "grey88",
+    linewidth = 1.6
+  ) +
+  geom_point(
+    aes(fill = support_n, alpha = label_flag),
+    shape = 21,
+    size = 4,
+    color = "black",
+    stroke = 0.3
+  ) +
+geom_point(
+  aes(fill = support_n, alpha = label_flag),
+  shape = 21,
+  size = 4,
+  color = "black",
+  stroke = 0.3
+) +
+# ggrepel::geom_text_repel(
+#   data = bridge_fig_df %>% filter(!label_flag),
+#   aes(
+#     label = gene),
+#   size = 4.0,
+#   color = "black",
+#   segment.color = "grey20",
+#   segment.size = 0.3,
+#   force = 0.25,                
+#   max.overlaps = Inf,
+#   direction = "y",
+#   hjust = 0,
+#   nudge_x = x_max_bridge * 0.25) +
+ggrepel::geom_text_repel(
+  data = bile_retinoid_df %>% filter(label_flag),
+  aes(label = gene),
+  size = 6,
+  color = "grey20",
+  segment.color = "grey35",
+  segment.size = 0.4,
+  direction = "y",
+  hjust = 0,
+  nudge_x = x_max_bridge * 0.025,
+  box.padding = 0.2,
+  point.padding = 0.15,
+  max.overlaps = Inf,
+  min.segment.length = 0
+)+
+  facet_wrap(~ pair_label, scales = "free_y", ncol = 1, labeller = labeller(
+    pair_label = function(x) sub("\n.*$", "", x)
+  ) ) +
+scale_y_discrete(
+  labels = function(x) sub("^.*___", "", x)
+) +
+  scale_x_continuous(
+    limits = c(0, x_max_bridge * 1.08),
+    expand = expansion(mult = c(0.01, 0.08))
+  ) +
+  scale_fill_grey(
+    start = 0.75,
+    end = 0.25,
+    name = "Methods supporting\npositive selection"
+  ) +
+  scale_alpha_manual(
+    values = c("TRUE" = 1, "FALSE" = 0.35),
+    guide = "none"
+  ) +
+  # labs(
+  #   x = "Median gene-level positive-site breadth across FUBAR and FEL\n(proportion of codon sites inferred as positively selected; descriptive ordering only)",
+    # y = NULL,
+    # title = "Bridge genes contributing to significant pathway-pair overlaps",
+    # subtitle = paste0(
+    #   "Only pathway pairs with BH-adjusted permutation significance are shown. ",
+    #   "All displayed genes were supported in >= ", min_methods_support,
+    #   " methods and annotated to both pathways in the pair. ",
+    #   "Within each pair, genes are ordered by tool support first, then by median FUBAR/FEL breadth. ",
+    #   "Top ", n_label_per_pair, " genes per pair are labeled, and any additional genes with median FUBAR/FEL breadth > ",
+    #   scales::percent(label_breadth_cut, accuracy = 1),
+    #   " are also labeled."
+    # ),
+    # caption = paste0(
+    #   "Pair-level significance comes from the BH-corrected permutation test; the x-axis is a descriptive gene-ordering quantity, not a significance threshold. ",
+    #   "The >",
+    #   scales::percent(label_breadth_cut, accuracy = 1),
+    #   " label rule is used only to highlight candidate genes for literature follow-up."
+    # )
+  theme_minimal(base_size = 11
+  ) 
+# 
+# p_bridge_Bile_retinoid
+# 
+# p_bridge_Bile_retinoid <- p_bridge_Bile_retinoid + theme_bold2
+# 
+# p_bridge_Bile_retinoid
+# 
+# ggsave(file.path(output_dir,"BILERetnoidsupple_lollipop.tiff"),plot = p_bridge_Bile_retinoid, height = 5, width = 18)
+
+
+
+p_bridge_Glycine <- ggplot(
+  glycine_df,
+  aes(x = median_breadth_ff, y = pair_gene)
+) +
+  geom_segment(
+    aes(x = 0, xend = median_breadth_ff, yend = pair_gene),
+    color = "grey88",
+    linewidth = 1.6
+  ) +
+  geom_point(
+    aes(fill = support_n, alpha = label_flag),
+    shape = 21,
+    size = 4,
+    color = "black",
+    stroke = 0.3
+  ) +
+geom_point(
+  aes(fill = support_n, alpha = label_flag),
+  shape = 21,
+  size = 4,
+  color = "black",
+  stroke = 0.3
+) +
+# ggrepel::geom_text_repel(
+#   data = bridge_fig_df %>% filter(!label_flag),
+#   aes(
+#     label = gene),
+#   size = 4.0,
+#   color = "black",
+#   segment.color = "grey20",
+#   segment.size = 0.3,
+#   force = 0.25,                
+#   max.overlaps = Inf,
+#   direction = "y",
+#   hjust = 0,
+#   nudge_x = x_max_bridge * 0.25) +
+ggrepel::geom_text_repel(
+  data = glycine_df %>% filter(label_flag),
+  aes(label = gene),
+  size = 6,
+  color = "grey20",
+  segment.color = "grey35",
+  segment.size = 0.4,
+  direction = "y",
+  hjust = 0,
+  nudge_x = x_max_bridge * 0.025,
+  box.padding = 0.2,
+  point.padding = 0.15,
+  max.overlaps = Inf,
+  min.segment.length = 0
+)+
+  facet_wrap(~ pair_label, scales = "free_y", ncol = 1, labeller = labeller(
+    pair_label = function(x) sub("\n.*$", "", x)
+  )) +
+scale_y_discrete(
+  labels = function(x) sub("^.*___", "", x)
+) +
+  scale_x_continuous(
+    limits = c(0, x_max_bridge * 1.08),
+    expand = expansion(mult = c(0.01, 0.08))
+  ) +
+  scale_fill_grey(
+    start = 0.75,
+    end = 0.25,
+    name = "Methods supporting\npositive selection"
+  ) +
+  scale_alpha_manual(
+    values = c("TRUE" = 1, "FALSE" = 0.35),
+    guide = "none"
+  ) +
+  labs(
+    x = "Median gene-level positive-site breadth across FUBAR and FEL\n(proportion of codon sites inferred as positively selected; descriptive ordering only)",
+    y = NULL,
+    # title = "Bridge genes contributing to significant pathway-pair overlaps",
+    # subtitle = paste0(
+    #   "Only pathway pairs with BH-adjusted permutation significance are shown. ",
+    #   "All displayed genes were supported in >= ", min_methods_support,
+    #   " methods and annotated to both pathways in the pair. ",
+    #   "Within each pair, genes are ordered by tool support first, then by median FUBAR/FEL breadth. ",
+    #   "Top ", n_label_per_pair, " genes per pair are labeled, and any additional genes with median FUBAR/FEL breadth > ",
+    #   scales::percent(label_breadth_cut, accuracy = 1),
+    #   " are also labeled."
+    # ),
+    # caption = paste0(
+    #   "Pair-level significance comes from the BH-corrected permutation test; the x-axis is a descriptive gene-ordering quantity, not a significance threshold. ",
+    #   "The >",
+    #   scales::percent(label_breadth_cut, accuracy = 1),
+    #   " label rule is used only to highlight candidate genes for literature follow-up."
+    # )
+  ) +
+  theme_minimal(base_size = 11
+  ) 
+
+p_bridge_Glycine
+
+p_bridge_Glycine <- p_bridge_Glycine + theme_bold3
+
+p_bridge_Glycine
+
+ggsave(file.path(output_dir,"Glycinesupple_lollipop.tiff"),plot = p_bridge_Glycine, height = 5, width = 18)
+
+
+
+## =========================================================
+## 14) QC / literature-follow-up table:
+##     keep ranking inputs explicit and mark label triggers
+## =========================================================
+
+bridge_rank_qc <- significant_pair_driver_genes_ranked %>%
+  mutate(
+    high_breadth_candidate = median_breadth_ff > label_breadth_cut,
+    top_flag = driver_rank_within_pair <= n_label_per_pair,
+    label_flag = top_flag | high_breadth_candidate,
+    label_reason = case_when(
+      top_flag & high_breadth_candidate ~ "top_rank_and_high_breadth",
+      top_flag ~ "top_rank",
+      high_breadth_candidate ~ "high_breadth_only",
+      TRUE ~ "unlabeled"
+    )
+  ) %>%
+  select(
+    category1, category2, gene,
+    driver_rank_within_pair,
+    support_n, support_methods,
+    median_breadth_ff,
+    high_breadth_candidate, top_flag, label_flag, label_reason,
+    n_pathways, pathway_list,
+    fubar_breadth, fel_breadth, meme_breadth,
+    fubar_n_sig, fel_n_sig, meme_n_sig,
+    p_bh
+  ) %>%
+  arrange(p_bh, category1, category2, driver_rank_within_pair)
+
+bridge_rank_qc <- bridge_rank_qc %>%
+  rename(
+    category1 = category1,
+    category2 = category2,
+    n_functional_categories = n_pathways,
+    functional_category_list = pathway_list
+  )
+
+
+bridge_rank_qc #%>% View()
+
+write.csv(bridge_rank_qc,file.path(output_dir, file = "bridge_rank_QC.csv"))
+
+```
+
+
+## FIGURE 3E: absrel
+genes farther right = supported on more distinct terminal branches
+bigger points = support appears in more partitions
+darker-filled points = higher median supported omega
+colored outlines = which pathway dominates
+triangles + grey side text = multi-pathway genes
+
+....Which genes show the most recurrent terminal-branch (ones w/full annotation) aBSREL support, and are those genes concentrated in particular pathway contexts?
+
+inset is answering a different question. It does not summarize genes. It uses all branch-level baseline omega values and compares their distributions across functional_category categories with one-vs-rest Wilcoxon tests, then BH-corrects those p-values. A star appears only when both raw p < 0.05 and BH-adjusted p <= 0.10
+
+Main panel = recurrent gene-level accumulation of supported terminal-branch signal
+Inset = pathway-level distributional context for branch-level baseline omega
+```{r}
+
+OMEGA_CAP <- 100
+
+# -----------------------------
+# user options
+# -----------------------------
+ABSREL_P_THRESH <- 0.05
+ABSREL_Q_THRESH <- 0.10
+MIN_BRANCHES_MAIN <- 2
+MIN_PARTITIONS_MAIN <- 0
+TOP_GENES_MAIN <- 25
+
+# -----------------------------
+# helpers
+# -----------------------------
+extract_species <- function(x) {
+  str_match(x, "^[^_]+_([A-Z]+_[A-Z]+(?:_[A-Z]+)?)_ENS")[, 2] |>
+    str_replace_all("_", " ")
+}
+
+# -----------------------------
+# input
+# -----------------------------
+function_metadata <- read_csv("gene_sets_union.csv")
+
+absrel_res <- read.csv("tabsrel_summary.csv") %>%
+  tidyr::extract(
+    col = gene_id,
+    into = c("gene_id", "partition"),
+    regex = "^(.*?)(part.*)$",
+    remove = FALSE
+  )
+
+function_metadata <- function_metadata %>%
+  rename(functional_category = pathway_label)
+
+absrel <- absrel_res %>%
+  left_join(function_metadata, by = c("gene_id" = "symbol")) %>%
+  filter(!str_detect(branch_id, "^NODE")) %>%
+  mutate(
+  functional_category = coalesce(functional_category, pathway_key, "unknown"),
+    baseline_omega = pmin(aBSREL_baseline_omega, OMEGA_CAP),
+    p_raw = pmin(
+      coalesce(aBSREL_pvalue_uncorrected,
+               aBSREL_pvalue_corrected,
+               aBSREL_pvalue),
+      1
+    ),
+    lrt            = aBSREL_LRT,    
+    positive_omega_classes  = aBSREL_positive_omega_classes,  
+    positive_omega_weights  = aBSREL_positive_omega_weights,
+    gene          = gene_id,
+    species_label = extract_species(branch_id),
+    label_text    = paste(gene, species_label, sep = ", ")
+  ) %>%
+  filter(
+    !is.na(branch_id),
+    !is.na(gene),
+    !is.na(species_label),
+    !is.na(partition),
+    !is.na(baseline_omega),
+    !is.na(functional_category),
+    !is.na(p_raw)
+  ) %>%
+  mutate(
+    p_adj_dataset = p.adjust(p_raw, method = "BH"),
+    supported_branch_global = p_raw < ABSREL_P_THRESH & p_adj_dataset <= ABSREL_Q_THRESH
+  )
+
+# -----------------------------
+# partition ordering
+# -----------------------------
+partition_levels <- absrel %>%
+  distinct(partition) %>%
+  mutate(part_num = suppressWarnings(as.numeric(str_extract(partition, "\\d+")))) %>%
+  arrange(part_num, partition) %>%
+  pull(partition)
+
+
+absrel <- absrel %>%
+  filter(!str_detect(branch_id, regex("NODE", ignore_case = TRUE))) %>%  
+  group_by(gene) %>%
+  mutate(n_seqs_gene = n_distinct(branch_id)) %>%
+  ungroup() %>%
+  filter(n_seqs_gene >= 5) %>% 
+  mutate(partition = factor(partition, levels = partition_levels))
+
+
+absrel <- filter_one2manyID(absrel, "gene_id")
+
+absrel <- exorcise(absrel, "gene_id")
+
+# =========================================================
+# 1) globally supported terminal branches
+# =========================================================
+absrel_supported <- absrel %>%
+  filter(supported_branch_global)
+
+# supported branches with omega > 1 for positive-branch omega summaries
+absrel_supported_pos <- absrel_supported %>%
+  filter(baseline_omega > 1)
+
+# =========================================================
+# 2) summarize supported branches by gene
+#    counts use all globally supported terminal branches
+#    omega summaries use only globally supported branches with omega > 1
+# =========================================================
+absrel_gene_summary <- absrel_supported %>%
+  group_by(gene) %>%
+  summarise(
+    n_supported_branch_obs = n(),
+    n_unique_supported_terminal_branches = n_distinct(branch_id),
+
+    n_partitions_supported = n_distinct(as.character(partition)),
+    partitions = paste(sort(unique(as.character(partition))), collapse = "; "),
+
+    n_species_observed = n_distinct(species_label),
+    species = paste(sort(unique(species_label)), collapse = "; "),
+
+    n_pathways_supported = n_distinct(functional_category),
+    pathways = paste(sort(unique(functional_category)), collapse = " | "),
+    dominant_pathway = names(sort(table(functional_category), decreasing = TRUE))[1],
+
+    n_supported_terminal_branches_omega_gt1 = n_distinct(branch_id[baseline_omega > 1]),
+
+    median_supported_omega_pos = {
+      x <- baseline_omega[baseline_omega > 1]
+      if (length(x) == 0) NA_real_ else median(x, na.rm = TRUE)
+    },
+    q90_supported_omega_pos = {
+      x <- baseline_omega[baseline_omega > 1]
+      if (length(x) == 0) NA_real_ else quantile(x, 0.90, na.rm = TRUE)
+    },
+    max_supported_omega_pos = {
+      x <- baseline_omega[baseline_omega > 1]
+      if (length(x) == 0) NA_real_ else max(x, na.rm = TRUE)
+    },
+
+    min_p_raw = min(p_raw, na.rm = TRUE),
+    min_p_adj_dataset = min(p_adj_dataset, na.rm = TRUE),
+    exemplar_species = species_label[which.max(baseline_omega)],
+    exemplar_label = label_text[which.max(baseline_omega)],
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # short alias for plotting
+    n_supported_branches = n_unique_supported_terminal_branches
+  ) %>%
+  filter(
+    n_unique_supported_terminal_branches >= MIN_BRANCHES_MAIN |
+      n_partitions_supported >= MIN_PARTITIONS_MAIN |
+      n_pathways_supported > 1
+  ) %>%
+  arrange(
+    desc(n_unique_supported_terminal_branches),
+    desc(n_partitions_supported),
+    desc(n_supported_terminal_branches_omega_gt1),
+    desc(median_supported_omega_pos),
+    gene
+  )
+
+# keep only top recurrent genes for the main panel
+absrel_top_genes <- absrel_gene_summary %>%
+  slice_head(n = TOP_GENES_MAIN)
+
+
+
+gene_levels <- absrel_top_genes %>%
+  arrange(
+    n_supported_branches,
+    n_partitions_supported,
+    median_supported_omega_pos,
+    gene
+  ) %>%
+  pull(gene)
+
+absrel_top_genes <- absrel_top_genes %>%
+  mutate(
+    gene = factor(gene, levels = gene_levels),
+    dominant_pathway = factor(dominant_pathway),
+    pathway_note = if_else(n_pathways_supported > 1, pathways, NA_character_)
+  )
+
+# =========================================================
+# 3) main panel
+#    x = unique supported terminal branches
+#    size = supported partitions
+#    fill = median omega among supported branches with omega > 1
+#    color = dominant pathway
+#    shape = multi-pathway vs single-pathway
+# =========================================================
+x_max_absrel <- max(absrel_top_genes$n_supported_branches, na.rm = TRUE)
+if (!is.finite(x_max_absrel) || x_max_absrel <= 0) {
+  x_max_absrel <- 1
+}
+
+#title and subtitle
+
+    # title = "Recurrent aBSREL-supported signal across top genes",
+    # subtitle = paste0(
+    #   "Main panel summarizes genes with globally supported terminal branches ",
+    #   "(raw p < ", ABSREL_P_THRESH,
+    #   ", dataset-wide BH-adjusted q <= ", ABSREL_Q_THRESH,
+    #   "). X = number of unique supported terminal branches; point size = number of supported partitions. ",
+    #   "Point fill shows the median baseline omega among supported branches with omega > 1. ",
+    #   "Small grey text marks pathway categories for multi-pathway genes."
+
+
+pABSREL_main <- ggplot(
+  absrel_top_genes,
+  aes(x = n_supported_branches, y = gene)
+) +
+  geom_segment(
+    aes(
+      x = 0,
+      xend = n_supported_branches,
+      yend = gene,
+      color = dominant_pathway
+    ),
+    linewidth = 0.8,
+    alpha = 0.55,
+    show.legend = FALSE
+  ) +
+  geom_point(
+    aes(
+      size = n_partitions_supported,
+      fill = median_supported_omega_pos,
+      color = dominant_pathway,
+      shape = n_pathways_supported > 1
+    ),
+    stroke = 0.5,
+    alpha = 0.95
+  ) +
+      scale_color_manual(values = Category)+
+  geom_text_repel(
+    aes(label = as.character(gene)),
+    size = 0,
+    box.padding = 0.22,
+    point.padding = 0.14,
+    min.segment.length = 0,
+    max.overlaps = Inf,
+    seed = 1,
+    color = "black",
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = absrel_top_genes %>% filter(n_pathways_supported > 1, !is.na(pathway_note)),
+    aes(
+      x = n_supported_branches + max(0.18, 0.03 * x_max_absrel),
+      y = gene,
+      label = pathway_note
+    ),
+    inherit.aes = FALSE,
+    vjust = 0.35,
+    hjust = -0.03,
+    size = 2.85,
+    color = "grey15",
+    lineheight = 0.95
+  ) +
+  scale_shape_manual(
+    values = c(`FALSE` = 21, `TRUE` = 24),
+    labels = c(`FALSE` = "single-Category gene", `TRUE` = "multi-Category gene"),
+    name = "Category context"
+  ) +
+  scale_size_continuous(
+    range = c(2.5, 6.5),
+    breaks = sort(unique(absrel_top_genes$n_partitions_supported)),
+    name = "Supported partitions"
+  ) +
+  scale_fill_gradient(
+    low = "grey85",
+    high = "grey15",
+    na.value = "grey92",
+    name = "Median baseline omega\namong supported branches\nwith omega > 1"
+  ) +
+  scale_x_continuous(
+    breaks = pretty_breaks(),
+    limits = c(0, x_max_absrel * 1.55),
+    expand = expansion(mult = c(0.01, 0.04))
+  ) +
+  labs(
+    # title = "Recurrent aBSREL-supported signal across top genes",
+    # subtitle = paste0(
+    #   "Main panel summarizes genes with globally supported terminal branches ",
+    #   "(raw p < ", ABSREL_P_THRESH,
+    #   ", dataset-wide BH-adjusted q <= ", ABSREL_Q_THRESH,
+    #   "). X = number of unique supported terminal branches; point size = number of supported partitions. ",
+    #   "Point fill shows the median baseline omega among supported branches with omega > 1. ",
+    #   "Small grey text marks pathway categories for multi-pathway genes."
+    # ),
+    x = "Unique supported terminal branches",
+    y = NULL,
+    color = "Dominant Category"
+  ) +
+  guides(color = "none")+
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 8, color = "grey20"),
+    axis.text.x = element_text(color = "grey15"),
+    axis.title = element_text(color = "grey10"),
+    plot.title = element_text(face = "bold", size = 13, color = "grey10"),
+    plot.subtitle = element_text(size = 10, color = "grey35"),
+    legend.position = "right"
+  ) 
+pABSREL_main <- pABSREL_main + theme_bold
+
+# =========================================================
+# 4) branch-level companion table for displayed genes
+# =========================================================
+absrel_branch_table <- absrel_supported %>%
+  semi_join(absrel_top_genes %>% select(gene), by = "gene") %>%
+  left_join(
+    absrel_top_genes %>%
+      select(
+        gene,
+        n_supported_branch_obs,
+        n_unique_supported_terminal_branches,
+        n_supported_branches,
+        n_partitions_supported,
+        n_pathways_supported,
+        dominant_pathway,
+        pathways,
+        n_supported_terminal_branches_omega_gt1,
+        median_supported_omega_pos,
+        q90_supported_omega_pos,
+        max_supported_omega_pos
+      ),
+    by = "gene"
+  ) %>%
+  arrange(
+    desc(n_unique_supported_terminal_branches),
+    desc(n_partitions_supported),
+    gene,
+    desc(baseline_omega),
+    p_raw,
+    species_label
+  ) %>%
+  select(
+    gene,
+    species_label,
+    functional_category,
+    partition,
+    baseline_omega,
+    p_raw,
+    p_adj_dataset,
+    supported_branch_global,
+    n_supported_branch_obs,
+    n_unique_supported_terminal_branches,
+    n_supported_branches,
+    n_partitions_supported,
+    n_pathways_supported,
+    dominant_pathway,
+    pathways,
+    n_supported_terminal_branches_omega_gt1,
+    median_supported_omega_pos,
+    q90_supported_omega_pos,
+    max_supported_omega_pos
+  )
+
+absrel_branch_table
+
+# compact gene-level table for writeup
+absrel_gene_table <- absrel_top_genes %>%
+  select(
+    gene,
+    dominant_pathway,
+    n_supported_branch_obs,
+    n_unique_supported_terminal_branches,
+    n_supported_branches,
+    n_partitions_supported,
+    n_pathways_supported,
+    pathways,
+    n_supported_terminal_branches_omega_gt1,
+    median_supported_omega_pos,
+    q90_supported_omega_pos,
+    max_supported_omega_pos,
+    min_p_raw,
+    min_p_adj_dataset,
+    exemplar_species
+  )
+
+absrel_gene_table
+
+# =========================================================
+# pathway inset
+# revert to all branch-level baseline omega values by pathway
+# sideways, consistent with MEME / FEL / FUBAR
+# =========================================================
+path_order <- absrel %>%
+  group_by(functional_category) %>%
+  summarise(med = median(baseline_omega, na.rm = TRUE), .groups = "drop") %>%
+  arrange(med) %>%
+  pull(functional_category)
+
+pathway_plot_df <- absrel %>%
+  mutate(
+  functional_category= factor(functional_category, levels = path_order)
+  )
+
+sig_tbl <- tibble(functional_category = levels(pathway_plot_df$functional_category)) %>%
+  mutate(
+    p_value = purrr::map_dbl(functional_category, \(pw) {
+      x <- pathway_plot_df$baseline_omega[pathway_plot_df$functional_category == pw]
+      y <- pathway_plot_df$baseline_omega[pathway_plot_df$functional_category != pw]
+      if (length(x) < 2 || length(y) < 2) NA_real_
+      else wilcox.test(x, y, exact = FALSE)$p.value
+    }),
+    median_pathway = purrr::map_dbl(functional_category, \(pw)
+      median(pathway_plot_df$baseline_omega[pathway_plot_df$functional_category == pw], na.rm = TRUE)
+    ),
+    median_rest = purrr::map_dbl(functional_category, \(pw)
+      median(pathway_plot_df$baseline_omega[pathway_plot_df$functional_category != pw], na.rm = TRUE)
+    )
+  ) %>%
+  mutate(
+    delta_median = median_pathway - median_rest,
+    p_adj = p.adjust(p_value, method = "BH"),
+    sig_both = !is.na(p_value) & !is.na(p_adj) & p_value < 0.05 & p_adj <= 0.10
+  )
+
+star_df_absrel <- pathway_plot_df %>%
+  group_by(functional_category) %>%
+  summarise(
+    y_max = max(baseline_omega, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    y = pmax(y_max * 1.35, y_max + 0.05)
+  ) %>%
+  left_join(
+    sig_tbl %>% select(functional_category, sig_both),
+    by = "functional_category"
+  ) %>%
+  filter(sig_both)
+
+upper_lim_absrel <- max(
+  c(pathway_plot_df$baseline_omega, star_df_absrel$y, 0.05),
+  na.rm = TRUE
+) * 1.05
+
+
+
+pathway_plot_df$functional_category <- factor(
+  pathway_plot_df$functional_category,
+  levels = Category_order
+)
+
+star_df_absrel$functional_category <- factor(
+  star_df_absrel$functional_category,
+  levels = Category_order
+)
+
+#title and subtitle 
+    # title = "Distributions of branch-level baseline omega by pathway",
+    # subtitle = "* shown only when raw p < 0.05 and BH-adjusted p <= 0.10 in one-vs-rest Wilcoxon tests",
+
+
+p_inset_absrel <- ggplot(
+  pathway_plot_df,
+  aes(functional_category, baseline_omega, color = functional_category)
+) +
+  geom_violin(
+    fill = "grey90",
+    color = "grey45",
+    scale = "width",
+    alpha = 0.55,
+    linewidth = 0.35
+  ) +
+  geom_boxplot(
+    width = 0.18,
+    outlier.shape = NA,
+    fill = NA,
+    color = "grey20",
+    linewidth = 0.30
+  ) +
+  geom_jitter(width = 0.12, size = 0.9, alpha = 0.75, stroke = 0.2,
+              show.legend = FALSE) +
+  geom_label(
+    data = star_df_absrel,
+    aes(functional_category, y),
+    label = "*",
+    inherit.aes = FALSE,
+    fill = "white",
+    color = "black",
+    label.size = 0,
+    size = 10.0,
+    label.padding = grid::unit(0.05, "lines")
+  ) +
+  coord_flip(clip = "off") +
+  scale_color_manual(values = Category) +
+  scale_y_continuous(
+    trans = scales::pseudo_log_trans(sigma = 0.01),
+    limits = c(0, upper_lim_absrel),
+    expand = expansion(mult = c(0.02, 0.20)),
+    name = "Baseline omega across all terminal branches"
+  ) +
+  labs(
+    x = NULL,
+    # title = "Distributions of branch-level baseline omega by Category",
+    # subtitle = "* shown only when raw p < 0.05 and BH-adjusted p <= 0.10 in one-vs-rest Wilcoxon tests",
+    color = "Category"
+  ) +
+  theme_minimal(base_size = 8) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(size = 9, face = "bold"),
+    plot.subtitle = element_text(size = 7),
+    axis.text.y = element_text(size = 6),
+    axis.text.x = element_text(size = 6),
+    legend.position = "none",
+    plot.margin = margin(4, 18, 4, 4),
+    plot.background = element_rect(fill = "white", color = "white", linewidth = 0.4),
+    panel.background = element_rect(fill = "white", color = NA),
+  )+inset_style()
+
+# =========================================================
+# 6) final composed figure
+#    inset shifted lower
+# =========================================================
+pABSREL_final <- pABSREL_main +
+  patchwork::inset_element(
+    p_inset_absrel,
+    left = 0.60,
+    right = 0.98,
+    bottom = 0.42,
+    top = 0.72,
+    align_to = "panel"
+  )
+
+pABSREL_final
+
+absrel_supp_main <- absrel_supported %>%
+  semi_join(absrel_top_genes %>% select(gene), by = "gene") %>%
+  transmute(
+    gene,
+    species_label,
+    functional_category,
+    partition,
+    baseline_omega          = round(baseline_omega, 4),
+    lrt                     = round(lrt, 4),
+    p_raw                   = signif(p_raw, 4),
+    p_adj_dataset           = signif(p_adj_dataset, 4),
+    supported_branch_global,
+    positive_omega_classes,
+    positive_omega_weights
+  ) %>%
+  arrange(gene, desc(baseline_omega), p_raw, species_label)
+
+absrel_supp_inset <- sig_tbl %>%
+  transmute(
+    functional_category,
+    n_path = purrr::map_int(functional_category, ~ sum(pathway_plot_df$functional_category == .x)),
+    n_rest = purrr::map_int(functional_category, ~ sum(pathway_plot_df$functional_category != .x)),
+    med_path = round(median_pathway, 4),
+    med_rest = round(median_rest, 4),
+    delta_median = round(delta_median, 4),
+    p_raw = signif(p_value, 4),
+    p_bh = signif(p_adj, 4),
+    sig_both
+  ) %>%
+  arrange(p_bh, p_raw)
+
+
+ggsave(file.path(output_dir,"Fig3ABSREL.E.tiff"),plot = pABSREL_main, height = 8, width = 15)
+
+
+ggsave(file.path(output_dir,"Fig3ABSRELinset.E.tiff"),plot = p_inset_absrel, height = 8, width = 15)
+
+
+absrel_top_genes <- absrel_top_genes %>%
+  rename(
+    n_functional_categories_supported = n_pathways_supported,
+    functional_categories = pathways,
+    dominant_functional_category = dominant_pathway,
+    functional_category_note = pathway_note
+  )
+
+# write.csv(file.path(output_dir,breadth_test, file="breadth_test_ABSREL.csv")
+# write.csv(file.path(output_dir,intensity_test, file = "intensity_test_ABSREL.csv")
+write.csv(absrel_top_genes,file.path(output_dir, file = "absrel_top_genes.csv" ))
+write.csv(absrel_supp_inset,file.path(output_dir, file = "absrel_supp_inset.csv"))
+write.csv(absrel_supp_main,file.path(output_dir, file = "absrel_supp_main.csv" ))
+
+
+```
+
+
+<!-- #SupplTable -->
+<!-- ```{r} -->
+
+
+<!-- #  -->
+<!-- #  -->
+<!-- # absrel_gene_summary_full <- absrel_supported %>% -->
+<!-- #   group_by(gene) %>% -->
+<!-- #   summarise( -->
+<!-- #     n_supported_branch_obs = n(), -->
+<!-- #     n_unique_supported_terminal_branches = n_distinct(branch_id), -->
+<!-- #  -->
+<!-- #     n_partitions_supported = n_distinct(as.character(partition)), -->
+<!-- #     partitions = paste(sort(unique(as.character(partition))), collapse = "; "), -->
+<!-- #  -->
+<!-- #     n_species_observed = n_distinct(species_label), -->
+<!-- #     species = paste(sort(unique(species_label)), collapse = "; "), -->
+<!-- #  -->
+<!-- #     n_categories_supported = n_distinct(functional_category), -->
+<!-- #     categories = paste(sort(unique(functional_category)), collapse = " | "), -->
+<!-- #     dominant_category = names(sort(table(functional_category), decreasing = TRUE))[1], -->
+<!-- #  -->
+<!-- #     n_supported_terminal_branches_omega_gt1 = -->
+<!-- #       n_distinct(branch_id[baseline_omega > 1]), -->
+<!-- #  -->
+<!-- #     median_supported_omega_pos = { -->
+<!-- #       x <- baseline_omega[baseline_omega > 1] -->
+<!-- #       if (length(x) == 0) NA_real_ else median(x, na.rm = TRUE) -->
+<!-- #     }, -->
+<!-- #     q90_supported_omega_pos = { -->
+<!-- #       x <- baseline_omega[baseline_omega > 1] -->
+<!-- #       if (length(x) == 0) NA_real_ else quantile(x, 0.90, na.rm = TRUE) -->
+<!-- #     }, -->
+<!-- #     max_supported_omega_pos = { -->
+<!-- #       x <- baseline_omega[baseline_omega > 1] -->
+<!-- #       if (length(x) == 0) NA_real_ else max(x, na.rm = TRUE) -->
+<!-- #     }, -->
+<!-- #  -->
+<!-- #     min_p_raw = min(p_raw, na.rm = TRUE), -->
+<!-- #     min_p_adj_dataset = min(p_adj_dataset, na.rm = TRUE), -->
+<!-- #     exemplar_species = species_label[which.max(baseline_omega)], -->
+<!-- #     exemplar_label = label_text[which.max(baseline_omega)], -->
+<!-- #     .groups = "drop" -->
+<!-- #   ) %>% -->
+<!-- #   mutate( -->
+<!-- #     n_supported_branches = n_unique_supported_terminal_branches, -->
+<!-- #     category_note = if_else(n_categories_supported > 1, categories, NA_character_) -->
+<!-- #   ) %>% -->
+<!-- #   arrange( -->
+<!-- #     gene, -->
+<!-- #     desc(n_unique_supported_terminal_branches), -->
+<!-- #     desc(n_partitions_supported) -->
+<!-- #   ) -->
+<!-- #  -->
+<!-- # # absrel_gene_summary_full <- absrel_gene_summary_full %>% -->
+<!-- # #   rename( -->
+<!-- # #     dominant_category = dominant_pathway, -->
+<!-- # #     categories = pathways, -->
+<!-- # #     n_categories_supported = n_pathways_supported -->
+<!-- # #   ) -->
+<!-- #  -->
+<!-- # absrel_full_primategene_table <- absrel_supported %>% -->
+<!-- #   select( -->
+<!-- #     species_label, -->
+<!-- #     gene, -->
+<!-- #     functional_category, -->
+<!-- #     partition, -->
+<!-- #     baseline_omega, -->
+<!-- #     p_raw, -->
+<!-- #     p_adj_dataset, -->
+<!-- #     supported_branch_global -->
+<!-- #   ) %>% -->
+<!-- #   left_join( -->
+<!-- #     absrel_gene_summary_full %>% -->
+<!-- #       select( -->
+<!-- #         gene, -->
+<!-- #         n_supported_branch_obs, -->
+<!-- #         n_unique_supported_terminal_branches, -->
+<!-- #         n_supported_branches, -->
+<!-- #         n_partitions_supported, -->
+<!-- #         n_categories_supported, -->
+<!-- #         dominant_category, -->
+<!-- #         categories, -->
+<!-- #         n_supported_terminal_branches_omega_gt1, -->
+<!-- #         median_supported_omega_pos, -->
+<!-- #         q90_supported_omega_pos, -->
+<!-- #         max_supported_omega_pos, -->
+<!-- #         min_p_raw, -->
+<!-- #         min_p_adj_dataset, -->
+<!-- #         exemplar_species -->
+<!-- #       ), -->
+<!-- #     by = "gene" -->
+<!-- #   ) %>% -->
+<!-- #   arrange( -->
+<!-- #     gene, -->
+<!-- #     species_label, -->
+<!-- #     desc(baseline_omega), -->
+<!-- #     p_raw -->
+<!-- #   ) -->
+<!-- #  -->
+<!-- #  -->
+<!-- # absrel_full_primategene_table <- absrel_full_primategene_table %>% -->
+<!-- #   rename( -->
+<!-- #  functional_categories =  categories -->
+<!-- #   ) -->
+<!-- #  -->
+<!-- #  -->
+<!-- # absrel_full_primategene_table -->
+<!-- #  -->
+<!-- # write.csv(file.path(output_dir,absrel_full_primategene_table, file = "absrel_full_primategene_table.csv") -->
+
+<!-- bile_fat_genes <- unique(bile_fatty_df$gene) -->
+<!-- #  -->
+<!-- # bile_fat_genes <- filter_one2manyID(bile_fat_genes, "gene") -->
+
+<!-- bile_fat_branches <- absrel_supported %>% -->
+<!--   filter( -->
+<!--     gene %in% bile_fat_genes, -->
+<!--     baseline_omega > 1, -->
+<!--     supported_branch_global == TRUE -->
+<!--   ) %>% -->
+<!--   count(species_label, sort = TRUE) -->
+
+
+
+<!-- library(purrr) -->
+
+<!-- species_enrichment <- map_df(unique(absrel_supported$species_label), function(sp) { -->
+<!--   df <- absrel_supported %>% -->
+<!--     filter(species_label == sp) %>% -->
+<!--     distinct(gene, functional_category, hit = (baseline_omega > 1 & supported_branch_global)) -->
+
+<!--   k <- sum(df$hit & df$functional_category %in% c("Bile acid biosynthesis & metabolism", -->
+<!--                                                   "Fatty acid & cholesterol metabolism")) -->
+<!--   K <- sum(df$functional_category %in% c("Bile acid biosynthesis & metabolism", -->
+<!--                                          "Fatty acid & cholesterol metabolism")) -->
+<!--   n <- sum(df$hit) -->
+<!--   N <- nrow(df) -->
+
+<!--   tibble( -->
+<!--     species = sp, -->
+<!--     p_hyper = phyper(k - 1, K, N - K, n, lower.tail = FALSE), -->
+<!--     k = k, K = K, n = n, N = N -->
+<!--   ) -->
+<!-- }) -->
+
+<!-- set.seed(123) -->
+
+<!-- all_genes <- unique(absrel_supported$gene) -->
+
+<!-- # observed recurrence -->
+<!-- obs <- absrel_supported %>% -->
+<!--   filter( -->
+<!--     gene %in% bile_fat_genes, -->
+<!--     baseline_omega > 1, -->
+<!--     supported_branch_global -->
+<!--   ) %>% -->
+<!--   count(species_label, name = "obs_hits") -->
+
+<!-- # permutation -->
+<!-- perm_results <- replicate(5000, { -->
+<!--   perm_genes <- sample(all_genes, length(bile_fat_genes)) -->
+<!--   absrel_supported %>% -->
+<!--     filter( -->
+<!--       gene %in% perm_genes, -->
+<!--       baseline_omega > 1, -->
+<!--       supported_branch_global -->
+<!--     ) %>% -->
+<!--     count(species_label) %>% -->
+<!--     pull(n) -->
+<!-- }, simplify = FALSE) -->
+
+<!-- perm_df <- tibble( -->
+<!--   species_label = obs$species_label, -->
+<!--   obs_hits = obs$obs_hits, -->
+<!--   p_perm = map_dbl(obs$obs_hits, function(x) { -->
+<!--     mean(unlist(perm_results) >= x) -->
+<!--   }) -->
+<!-- ) -->
+
+
+<!-- gene_branch_counts <- absrel_supported %>% -->
+<!--   filter(baseline_omega > 1, supported_branch_global) %>% -->
+<!--   count(gene, name = "n_supported_branches") -->
+
+<!-- bile_fat_genes <- unique(bile_fatty_df$gene) -->
+
+<!-- bile_fat_branch_counts <- gene_branch_counts %>% -->
+<!--   filter(gene %in% bile_fat_genes) -->
+
+<!-- k <- sum(gene_branch_counts$gene %in% bile_fat_genes & gene_branch_counts$n_supported_branches > 0) -->
+<!-- K <- sum(gene_branch_counts$gene %in% bile_fat_genes) -->
+<!-- n <- sum(gene_branch_counts$n_supported_branches > 0) -->
+<!-- N <- nrow(gene_branch_counts) -->
+
+<!-- p_hyper_gene <- phyper(k - 1, K, N - K, n, lower.tail = FALSE) -->
+<!-- p_hyper_gene -->
+
+<!-- obs_total_branches <- sum(bile_fat_branch_counts$n_supported_branches) -->
+
+<!-- set.seed(123) -->
+
+<!-- all_genes <- unique(gene_branch_counts$gene) -->
+<!-- n_bile <- length(bile_fat_genes) -->
+
+<!-- perm_totals <- replicate(5000, { -->
+<!--   perm_genes <- sample(all_genes, n_bile) -->
+<!--   sum(gene_branch_counts$n_supported_branches[gene_branch_counts$gene %in% perm_genes]) -->
+<!-- }) -->
+
+<!-- p_perm_gene <- mean(perm_totals >= obs_total_branches) -->
+<!-- p_perm_gene -->
+
+<!-- gene_species_matrix <- absrel_supported %>% -->
+<!--   mutate(hit = as.integer(baseline_omega > 1 & supported_branch_global)) %>% -->
+<!--   group_by(gene, species_label) %>% -->
+<!--   summarise(hit = max(hit), .groups = "drop") %>%   # collapse duplicates -->
+<!--   pivot_wider( -->
+<!--     names_from = species_label, -->
+<!--     values_from = hit, -->
+<!--     values_fill = 0 -->
+<!--   ) -->
+
+
+<!-- library(vegan) -->
+
+<!-- bile_fat_matrix <- gene_species_matrix %>% -->
+<!--   filter(gene %in% bile_fat_genes) %>% -->
+<!--   column_to_rownames("gene") -->
+
+<!-- jaccard_matrix <- vegdist(bile_fat_matrix, method = "jaccard") -->
+
+<!-- jaccard_matrix -->
+
+<!-- row_sums <- rowSums(bile_fat_matrix) -->
+<!-- row_sums -->
+
+<!-- bile_fat_matrix_filtered <- bile_fat_matrix[rowSums(bile_fat_matrix) > 0, ] -->
+
+<!-- jaccard_matrix1 <- vegdist(bile_fat_matrix_filtered, method = "jaccard") -->
+
+
+<!-- hc <- hclust(jaccard_matrix1, method = "average") -->
+<!-- plot(hc) -->
+
+<!-- tiff(file.path(output_dir,"bilefat_jaccard_dendrogram.tiff", width = 2000, height = 1600, res = 300, compression = "lzw")) -->
+<!-- plot(hc, main = "Bile-Fat Gene Convergence Dendrogram", xlab = "", sub = "") -->
+<!-- dev.off() -->
+
+
+<!-- library(pheatmap) -->
+
+<!-- Heatmap_Bile <- pheatmap(as.matrix(bile_fat_matrix), -->
+<!--          cluster_rows = TRUE, -->
+<!--          cluster_cols = TRUE, -->
+<!--          color = c("white", "black")) -->
+
+<!-- Heatmap_Bile -->
+
+<!-- write.csv( -->
+<!--   bile_fat_branches, -->
+<!--   file = file.path(output_dir, "bile_fat_branch_recurrence.csv"), -->
+<!--   row.names = FALSE -->
+<!-- ) -->
+
+
+<!-- ## species enrichment -->
+<!-- write.csv( -->
+<!--   species_enrichment, -->
+<!--   file = file.path(output_dir, "species_enrichment_bilefat_genedrivers.csv"), -->
+<!--   row.names = FALSE -->
+<!-- ) -->
+
+<!-- ## permutation df -->
+<!-- write.csv( -->
+<!--   perm_df, -->
+<!--   file = file.path(output_dir, "species_permutation_bilefat_genedrivers.csv"), -->
+<!--   row.names = FALSE -->
+<!-- ) -->
+
+<!-- ## branch counts (all genes) -->
+<!-- write.csv( -->
+<!--   gene_branch_counts, -->
+<!--   file = file.path(output_dir, "gene_branch_counts_allgenes.csv"), -->
+<!--   row.names = FALSE -->
+<!-- ) -->
+
+<!-- ## branch counts (bile-fat only) -->
+<!-- write.csv( -->
+<!--   bile_fat_branch_counts, -->
+<!--   file = file.path(output_dir, "gene_branch_counts_bilefat_only.csv"), -->
+<!--   row.names = FALSE -->
+<!-- ) -->
+
+<!-- ## hypergeometric gene-level test -->
+<!-- write.table( -->
+<!--   data.frame(p_hyper_gene = p_hyper_gene), -->
+<!--   file = file.path(output_dir, "genelevel_hypergeometric_bilefat.txt"), -->
+<!--   row.names = FALSE, -->
+<!--   quote = FALSE -->
+<!-- ) -->
+
+<!-- ## permutation gene-level test -->
+<!-- write.table( -->
+<!--   data.frame( -->
+<!--     obs_total_branches = obs_total_branches, -->
+<!--     p_perm_gene = p_perm_gene -->
+<!--   ), -->
+<!--   file = file.path(output_dir, "genelevel_permutation_bilefat.txt"), -->
+<!--   row.names = FALSE, -->
+<!--   quote = FALSE -->
+<!-- ) -->
+
+<!-- ## gene × species matrices -->
+<!-- write.csv( -->
+<!--   gene_species_matrix, -->
+<!--   file = file.path(output_dir, "gene_species_hit_matrix.csv"), -->
+<!--   row.names = FALSE -->
+<!-- ) -->
+
+<!-- write.csv( -->
+<!--   bile_fat_matrix, -->
+<!--   file = file.path(output_dir, "bilefat_gene_species_matrix_raw.csv"), -->
+<!--   row.names = FALSE -->
+<!-- ) -->
+
+<!-- write.csv( -->
+<!--   bile_fat_matrix_filtered, -->
+<!--   file = file.path(output_dir, "bilefat_gene_species_matrix_filtered.csv"), -->
+<!--   row.names = FALSE -->
+<!-- ) -->
+
+<!-- ## Jaccard matrices -->
+<!-- write.csv( -->
+<!--   as.matrix(jaccard_matrix), -->
+<!--   file = file.path(output_dir, "jaccard_matrix_raw.csv"), -->
+<!--   row.names = FALSE -->
+<!-- ) -->
+
+<!-- write.csv( -->
+<!--   as.matrix(jaccard_matrix1), -->
+<!--   file = file.path(output_dir, "jaccard_matrix_filtered.csv"), -->
+<!--   row.names = FALSE -->
+<!-- ) -->
+
+<!-- ## heatmap matrix -->
+<!-- write.csv( -->
+<!--   as.matrix(bile_fat_matrix), -->
+<!--   file = file.path(output_dir, "bilefat_heatmap_matrix.csv"), -->
+<!--   row.names = FALSE -->
+<!-- ) -->
+
+<!-- ## heatmap image -->
+<!-- library(grid) -->
+<!-- png( -->
+<!--   file.path(output_dir, "Heatmap_Bilefat.tiff"), -->
+<!--   width = 2000, height = 2400, res = 300 -->
+<!-- ) -->
+<!-- grid::grid.newpage() -->
+<!-- grid::grid.draw(Heatmap_Bile$gtable) -->
+<!-- dev.off() -->
+
+
+
+<!-- ``` -->
