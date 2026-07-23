@@ -1,0 +1,2357 @@
+---
+title: "3_absrelMETA"
+output: html_document
+date: "2026-03-22"
+---
+
+## Load Packages 
+```{r }
+
+#https://hyphy.org/resources/json-fields.pdf
+library(ape)
+library(ggtree)
+library(tidyverse)
+library(tidytext)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(scales)
+library(glue)
+library(tidytext)
+library(ggtext)
+library(KEGGREST)
+#BiocManager::install("sangerseqR")
+#devtools::install_version("bold", version="0.9.0", dependencies = FALSE)
+#install.packages('datelife', repos = c('https://phylotastic.r-universe.dev', 'https://cloud.r-project.org'))
+library(datelife)
+library(cowplot)
+library(tidyr)
+library(ggplot2)
+library(viridis)
+library(ggrepel)
+library(patchwork)
+library(forcats)
+library(scales)
+library(tidyverse)
+#install.packages("eulerr")
+library(eulerr) 
+#install.packages("UpSetR")
+library(UpSetR)    
+
+```
+## Setup
+
+any reference to pathway is a reference to functional category
+
+thinking we want to do two panels here one with add'l primate "lineage" category to see if we can do some clustering that way or something?
+
+then if nothing else: panel A primate diet category view, 
+                      panel B primate EQ category view
+
+```{r setup, include=FALSE}
+
+#set filter
+
+
+demons <- c(
+  "ABAT", "ACOT2", "ADH1A", "ADH1B", "ADH1C", "ADH6", "APOA2", "ATP1A4", "CETP",
+  "CH25H", "CTH", "CYP2A6", "CYP2A7", "CYP2C8", "CYP2C9", "CYP3A4", "CYP3A7",
+  "DHFR2", "DHRS4L2", "GPAT2", "LDHA", "LDHAL6B", "LPA", "PGAM4", "PLA2G2C",
+  "PLA2G4C", "PRKACG", "SLCO1B1", "UGT1A10", "UGT1A3", "UGT1A5", "UGT1A6",
+  "UGT1A7", "UGT1A8", "UGT1A9", "UGT2A2", "UGT2B10", "UGT2B11", "UGT2B15",
+  "UGT2B28", "UGT2B4", "UGT2B7"
+)
+
+exorcise <- function(df, gene_col) {
+  df %>%
+    mutate(.gene_tmp = toupper(.data[[gene_col]])) %>%
+    filter(!.gene_tmp %in% demons) %>%
+    select(-.gene_tmp)
+}
+ 
+
+absrel_res <- read.csv("tabsrel_summary.csv")
+absrel_res <- exorcise(absrel_res, "gene_id")
+absrel_res <- absrel_res %>% extract( col = gene_id, into = c("gene_id", "partition"), regex = "^(.*)(part.*)$" )
+function_metadata <- read_csv("gene_sets_union.csv")
+function_metadata <- exorcise(function_metadata, "symbol")
+absrel_res <- merge(absrel_res, function_metadata, by.x = "gene_id", by.y = "symbol")
+#### remove internal/root branches... for clarity/interpretations..
+absrel_res <- absrel_res %>% filter(!str_detect(branch_id, "NODE"))
+#see python aux script for which we used to handle gene length consideration...
+#/projects/b1057/apulvino/Chapter2/OrthologExplorer/results_sequences... rest of work for the entire proj is in v4 subdir...
+#used after so we have clean merge with fel_res df: sed -i 's/|/_/g' gene_lengths.tsv
+gene_length <- read_tsv("gene_lengths.tsv") %>% mutate(gene_id = str_to_upper(gene_id) )
+gene_length <- exorcise(gene_length, "gene_dir")
+absrel_res <- merge(absrel_res, gene_length, by.x = "branch_id" , by.y = "gene_id") %>% unique()
+absrel_res$species <- sub(".*_([A-Za-z]+_[A-Za-z]+)_.*", "\\1", absrel_res$branch_id)
+
+# ---- user config ----
+PVAL_THRESH <- 0.05
+OMEGA_CAP <- 100             # cap huge omega values for plotting
+# ----------------------
+
+# make p-value column robust (prefer corrected if available)
+absrel <- absrel_res %>%
+  mutate(
+    p_raw = coalesce(aBSREL_pvalue_uncorrected, aBSREL_pvalue),
+    p_corr = coalesce(aBSREL_pvalue_corrected, aBSREL_pvalue, p_raw),
+    p_use = if_else(!is.na(p_corr), p_corr, p_raw),
+    is_sig = if_else(!is.na(p_use) & p_use <= PVAL_THRESH, TRUE, FALSE),
+    branch_omega = coalesce(aBSREL_branch_omega, aBSREL_max_omega, NA_real_),
+    omega_plot = pmin(replace_na(branch_omega, 0), OMEGA_CAP),  # capped for plotting
+    lrt = coalesce(aBSREL_LRT, 0),
+    gene = gene_id,  # unify name
+    pathway_label = coalesce(pathway_label, pathway_key, "unknown")
+  ) %>%
+  dplyr::select(branch_id, gene, pathway_label, species, everything())
+
+############# CONSOLIDATION; DEFINING SIGNIFICANT FEATURES, ADDING METADATA-lvl REF INFO. ######################
+# assume `absrel` exists (as you constructed). If not, run your mutate block first.
+absrel_clean <- absrel %>%
+  filter(!str_detect(branch_id, regex("NODE", ignore_case = TRUE))) %>%
+  # group_by(gene) %>%
+  # filter(n() >= 5) %>%
+  # ungroup() %>%
+  mutate(
+    p_raw       = coalesce(aBSREL_pvalue_uncorrected, aBSREL_pvalue),
+    p_corr      = coalesce(aBSREL_pvalue_corrected, aBSREL_pvalue, p_raw),
+    p_use       = if_else(!is.na(p_corr), p_corr, p_raw),
+    q_global    = p.adjust(p_use, method = "BH"),
+    is_sig_glob = !is.na(q_global) & q_global <= 0.1,
+    is_sig_raw  = !is.na(p_use) & p_use <= PVAL_THRESH,
+    branch_omega = coalesce(aBSREL_branch_omega, aBSREL_max_omega, NA_real_),
+    omega_plot   = pmin(replace_na(branch_omega, 0), OMEGA_CAP)
+    )
+
+```
+
+
+## Branch Explorer
+panel A asks which group contributes the most total positive-branch burden ("burden" question) in a pathway. Using summed  branch omega
+
+Panel B asks which group accounts for the largest share of positive branches for each gene (representation question),... more fractional share of positive branches with an tie-breaking whole number of branches winner if needed (e.g. highest raw count of pos branches wins)
+### FIGURE 4A: primate species comparisons
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(patchwork)
+library(scales)
+library(grid)
+
+
+
+category_order <- c(
+  "Taurine and cysteine metabolism",
+  "Retinoid / vitamin A metabolism",
+  "Glycine metabolism",
+  "Fatty acid & cholesterol metabolism",
+  "Bile acid biosynthesis & metabolism"
+)
+
+
+
+species_palette <- c(
+  "AOTUS_NANCYMAAE"                 = "#0072B2",
+  "COLOBUS_ANGOLENSIS_PALLIATUS"    = "brown",
+  "PAN_TROGLODYTES"                 = "#009E73",
+  "MACACA_FASCICULARIS"             = "purple",
+  "CALLITHRIX_JACCHUS"              = "black",
+  "SAIMIRI_BOLIVIENSIS_BOLIVIENSIS" = "#56B4E9",
+  "HOMO_SAPIENS"                    = "red",
+  "MICROCEBUS_MURINUS"              = "darkgrey",
+  "PONGO_ABELII"                    = "#CC79A7",
+  "PAPIO_ANUBIS"                    = "#0072B2",
+  "GORILLA_GORILLA"                 = "#D55E00",
+  "PROLEMUR_SIMUS"                  = "#F0E442",
+  "MACACA_NEMESTRINA"               = "#56B4E9",
+  "CARLITO_SYRICHTA"                = "#999999",
+  "MACACA_MULATTA"                  = "#E69F00",
+  "CHLOROCEBUS_SABAEUS"             = "forestgreen",
+  "CERCOCEBUS_ATYS"                 = "#CC79A7"
+)
+
+theme_bold_large <- theme(
+  plot.title = element_text(size = 13, face = "bold", hjust = 0.1),
+  plot.subtitle = element_text(size = 14, face = "bold"),
+
+  axis.title.x = element_text(size = 12, face = "bold"),
+  axis.title.y = element_text(size = 12, face = "bold"),
+  axis.text.x  = element_text(size = 12, face = "bold", color = "black"),
+  axis.text.y  = element_text(size = 9.75, face = "bold", color = "black"),
+
+  legend.title = element_text(size = 12, face = "bold"),
+  legend.text  = element_text(size = 10, face = "bold"),
+  legend.key   = element_blank(),
+
+  strip.text.y = element_text(size = 8, face = "bold", angle = 0),
+  strip.text.y.left = element_text(margin = margin(1,1,1,1)),
+
+  panel.grid = element_blank(),
+  panel.border = element_rect(color = "black", size = .5, fill = NA),
+  axis.line = element_blank(),,
+
+  plot.margin = margin(10, 18, 10, 10)
+)
+
+
+
+theme_bold_large1 <- theme(
+  # Titles
+  plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+  plot.subtitle = element_text(size = 14, face = "bold"),
+
+  # Axes
+  axis.title.x = element_text(size = 16, face = "bold"),
+  axis.title.y = element_text(size = 16, face = "bold"),
+  axis.text.x  = element_text(size = 13, face = "bold", color = "black"),
+  axis.text.y  = element_text(size = 13, face = "bold", color = "black"),
+
+  # Legend
+  legend.title = element_text(size = 14, face = "bold"),
+  legend.text  = element_text(size = 12, face = "bold"),
+  legend.key   = element_blank(),
+
+  # Facet strips (if present)
+  strip.text = element_text(size = 12, face = "bold"),
+
+  # Panel + background
+  panel.grid = element_blank(),
+  panel.border = element_rect(color = "black", size = .5, fill = NA),
+  axis.line = element_blank(),
+
+  # Margins (keeps q-values visible)
+  plot.margin = margin(10, 10, 10, 10)
+)
+
+absrel_clean <- exorcise(absrel_clean, "gene")
+
+# ---- user knobs ----
+BASELINE_CAP   <- 100
+SIG_Q_THRESH   <- 0.10
+TOP_N_PER_PATH <- 10
+# --------------------
+
+# 0) choose the corrected branch-level q column once
+absrel_work <- absrel_clean
+
+if ("q_global" %in% names(absrel_work)) {
+  absrel_work$q_use <- absrel_work$q_global
+} else if ("aBSREL_pvalue_corrected" %in% names(absrel_work)) {
+  absrel_work$q_use <- absrel_work$aBSREL_pvalue_corrected
+} else {
+  stop("Need either q_global or aBSREL_pvalue_corrected in absrel_clean.")
+}
+
+# 1) parse + clean terminal branches, then keep positive branches only
+branch_baseline <- absrel_work %>%
+  filter(
+    !is.na(branch_id),
+    !str_detect(branch_id, "^NODE"),
+    !is.na(aBSREL_baseline_omega),
+    !is.na(pathway_label)
+  ) %>%
+  extract(
+    col   = branch_id,
+    into  = c("branch_gene", "species", "ensembl_tx", "ensembl_pep", "isoform_class"),
+    regex = "^([^_]+)_([A-Za-z]+_[A-Za-z]+(?:_[A-Za-z]+)?)_([^_]+)_([^_]+)_(CANONICAL|ALTERNATIVE)$",
+    remove = FALSE
+  ) %>%
+  mutate(
+    species = coalesce(
+      species,
+      sub(".*_([A-Za-z]+_[A-Za-z]+(?:_[A-Za-z]+)?)_.*", "\\1", branch_id)
+    ),
+    species = toupper(species),
+    sig = !is.na(q_use) & q_use <= SIG_Q_THRESH,
+    omega_pos = aBSREL_baseline_omega,
+    omega_cap = pmin(omega_pos, BASELINE_CAP),
+    pos_branch = sig & !is.na(omega_pos) & omega_pos > 1
+  ) %>%
+  filter(pos_branch)
+
+# optional sanity check
+branch_baseline %>%
+  summarise(
+    n_positive_branches   = n(),
+    min_positive_omega    = min(omega_pos, na.rm = TRUE),
+    median_positive_omega = median(omega_pos, na.rm = TRUE),
+    max_positive_omega    = max(omega_pos, na.rm = TRUE)
+  )
+
+# ============================================================
+# PANEL A
+# winning species per pathway
+# ============================================================
+
+pathway_species_sum <- branch_baseline %>%
+  group_by(pathway_label, species) %>%
+  summarise(
+    species_contrib = sum(omega_cap, na.rm = TRUE),
+    median_omega_cap = median(omega_cap, na.rm = TRUE),
+    max_omega_cap = max(omega_cap, na.rm = TRUE),
+    n_pos_branches = n(),
+    min_q_species = suppressWarnings(min(q_use, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    min_q_species = ifelse(is.infinite(min_q_species), NA_real_, min_q_species)
+  )
+
+winner_species_by_pathway <- pathway_species_sum %>%
+  group_by(pathway_label) %>%
+  slice_max(order_by = species_contrib, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(species_contrib) %>%
+  mutate(
+    pathway_label = factor(pathway_label, levels = pathway_label),
+    species_label = if_else(
+      !is.na(min_q_species) & min_q_species < 0.05,
+      paste0(species, " q=", signif(min_q_species, 2)),
+      species
+    )
+  )
+
+#removes label next to q value
+
+# winner_species_by_pathway <- winner_species_by_pathway %>%
+#   mutate(
+#     species_label = if_else(
+#       !is.na(min_q_species) & min_q_species < 0.05,
+#       paste0("q=", signif(min_q_species, 2)),
+#       ""
+#     )
+#   )
+
+
+# remove q scores
+
+winner_species_by_pathway <- winner_species_by_pathway %>%
+  mutate(
+    species_label = species   
+  )
+
+#reorder labels
+
+winner_species_by_pathway$pathway_label <- factor(winner_species_by_pathway$pathway_label, levels = category_order)
+
+#title
+
+
+# title = "A. Winning species per pathway"
+
+
+p_species_A <- ggplot(
+  winner_species_by_pathway,
+  aes(x = species_contrib, y = pathway_label, color = species, size = n_pos_branches)
+) +
+  geom_segment(
+    aes(x = 0, xend = species_contrib, yend = pathway_label),
+    color = "grey70",
+    linewidth = 0.4
+  ) +
+  geom_point() +
+  geom_text(
+    aes(label = species_label),
+    size = 3.2,
+    color = "#3C3C3C",
+    hjust= - 0.12,
+    fontface = "bold"
+  ) +
+  coord_cartesian(clip = "off") +
+  labs(
+    x = paste0("Summed capped branch \u03C9 by species (positive branches only; cap = ", BASELINE_CAP, ")"),
+    y = "Functional Category",
+    color = "Winning species",
+    size = "Positive\nbranches",
+    # title = "A. Winning species per pathway"
+  ) +
+  scale_color_manual(values = species_palette)  +
+  scale_x_continuous(
+  limits = c(0, max(winner_species_by_pathway$species_contrib) * 1.25),
+  expand = expansion(mult = c(0, 0.02))
+) +
+    #remove the color legend 
+  guides(color = "none") +
+  theme_bw() +
+  theme(
+    plot.margin = margin(5.5, 120, 5.5, 5.5),
+    legend.position = "right"
+  )
+
+p_species_A <- p_species_A +
+  theme_bold_large1
+
+# ============================================================
+# PANEL B
+# winning species for each top-branch gene within each pathway
+# simplified rule:
+#   1) highest represented fraction among positive branches (prop_obs)
+#   2) tie-break by n_pos_branches
+# integrated concentration summary in facet labels
+# ============================================================
+
+# top genes per pathway based on positive branches only
+top_genes_species <- branch_baseline %>%
+  group_by(pathway_label) %>%
+  slice_max(order_by = omega_cap, n = TOP_N_PER_PATH, with_ties = TRUE) %>%
+  ungroup() %>%
+  distinct(pathway_label, gene)
+
+# species-level collapse within each gene
+gene_species_pos <- branch_baseline %>%
+  semi_join(top_genes_species, by = c("pathway_label", "gene")) %>%
+  group_by(pathway_label, gene, species) %>%
+  summarise(
+    n_pos_branches = n(),
+    median_omega_cap = median(omega_cap, na.rm = TRUE),
+    max_omega_cap = max(omega_cap, na.rm = TRUE),
+    min_q_species = suppressWarnings(min(q_use, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    min_q_species = ifelse(is.infinite(min_q_species), NA_real_, min_q_species)
+  )
+
+# represented fraction within each pathway × gene
+gene_species_norm <- gene_species_pos %>%
+  group_by(pathway_label, gene) %>%
+  mutate(
+    total_pos_branches_gene = sum(n_pos_branches, na.rm = TRUE),
+    prop_obs = n_pos_branches / total_pos_branches_gene,
+    gene_pathway = paste(pathway_label, gene, sep = "___")
+  ) %>%
+  ungroup()
+
+# winning species per gene
+winner_species_per_gene <- gene_species_norm %>%
+  group_by(pathway_label, gene, gene_pathway) %>%
+  arrange(
+    desc(prop_obs),
+    desc(n_pos_branches),
+    species,
+    .by_group = TRUE
+  ) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  mutate(
+    species_label = if_else(
+      !is.na(min_q_species) & min_q_species < 0.05,
+      paste0(species, " q=", signif(min_q_species, 2)),
+      species
+    )
+  )
+
+# pathway-level positive-branch opportunity by species
+pathway_species_opportunity <- branch_baseline %>%
+  group_by(pathway_label, species) %>%
+  summarise(
+    n_pos_branches_path_species = n(),
+    .groups = "drop"
+  ) %>%
+  group_by(pathway_label) %>%
+  mutate(
+    expected_share = n_pos_branches_path_species / sum(n_pos_branches_path_species)
+  ) %>%
+  ungroup()
+
+# concentration summary for winner assignments within each pathway
+pathway_winner_summary <- winner_species_per_gene %>%
+  count(pathway_label, species, name = "winner_n") %>%
+  group_by(pathway_label) %>%
+  mutate(
+    winner_share = winner_n / sum(winner_n)
+  ) %>%
+  ungroup() %>%
+  left_join(
+    pathway_species_opportunity,
+    by = c("pathway_label", "species")
+  ) %>%
+  mutate(
+    winner_enrichment = winner_share / expected_share
+  )
+
+pathway_panel_labels <- pathway_winner_summary %>%
+  group_by(pathway_label) %>%
+  arrange(desc(winner_share), species, .by_group = TRUE) %>%
+  summarise(
+    top_winner = first(species),
+    top_winner_share = first(winner_share),
+    top_winner_enrichment = first(winner_enrichment),
+    top2_winner_share = sum(head(winner_share, 2)),
+    effective_n_winners = 1 / sum(winner_share^2),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pathway_panel = paste0(
+      pathway_label,
+      "\nTop winner: ", top_winner,
+      " (", scales::percent(top_winner_share, accuracy = 1), " of genes; ",
+      round(top_winner_enrichment, 2), "\u00D7 vs pathway opportunity)",
+      "\nTop2 share: ", scales::percent(top2_winner_share, accuracy = 1),
+      "; Effective winners: ", round(effective_n_winners, 1)
+    )
+  )
+
+winner_species_per_gene <- winner_species_per_gene %>%
+  left_join(
+    pathway_panel_labels %>% select(pathway_label, pathway_panel),
+    by = "pathway_label"
+  )
+
+gene_levels_species <- winner_species_per_gene %>%
+  group_by(pathway_label) %>%
+  arrange(prop_obs, .by_group = TRUE) %>%
+  ungroup() %>%
+  pull(gene_pathway)
+
+winner_species_per_gene <- winner_species_per_gene %>%
+  mutate(
+    gene_pathway = factor(gene_pathway, levels = unique(gene_levels_species)),
+    pathway_panel = factor(pathway_panel, levels = unique(pathway_panel_labels$pathway_panel))
+  )
+
+#this removes species label by q value
+
+# winner_species_per_gene <- winner_species_per_gene %>%
+#   mutate(
+#     species_label = if_else(
+#       !is.na(min_q_species) & min_q_species < 0.05,
+#       paste0("q=", signif(min_q_species, 2)),
+#       ""
+#     )
+#   )
+
+
+
+
+
+# remove q scores
+
+winner_species_per_gene <- winner_species_per_gene %>%
+  mutate(
+    species_label = species   
+  )
+
+
+#reorder labels
+
+winner_species_per_gene$pathway_label <- factor(winner_species_per_gene$pathway_label, levels = category_orderb)
+
+
+#title
+
+
+    # title = paste0(
+    #   "B. Winning species for each top-branch gene within each pathway",
+    #   " (genes containing a top ", TOP_N_PER_PATH, " capped-\u03C9 positive branch)"
+    # )
+
+p_species_B <- ggplot(
+  winner_species_per_gene,
+  aes(x = prop_obs, y = gene_pathway, color = species, size = n_pos_branches)
+) +
+  geom_segment(
+    aes(x = 0, xend = prop_obs, yend = gene_pathway),
+    color = "grey70",
+    linewidth = 0.4
+  ) +
+  scale_color_manual(values = species_palette) +
+  geom_point() +
+  geom_text(
+    aes(label = species_label),
+    size = 2.9,
+    color = "#3C3C3C",
+    hjust= - 0.085,
+    fontface = "bold"
+  ) +
+  facet_grid(pathway_label ~ ., scales = "free_y", space = "free_y") +
+  scale_y_discrete(labels = function(x) sub("^.*___", "", x)) +
+  coord_cartesian(clip = "off") +
+  labs(
+    x = "Winning represented fraction among positive branches",
+    y = "Gene",
+    color = "Winning species",
+    size = "Positive\nbranches",
+    # title = paste0(
+    #   "B. Winning species for each top-branch gene within each pathway",
+    #   " (genes containing a top ", TOP_N_PER_PATH, " capped-\u03C9 positive branch)"
+    # )
+  ) +
+  scale_x_continuous(
+  limits = c(0, max(winner_species_per_gene$prop_obs) * 1.75),
+  expand = expansion(mult = c(0, 0.15))
+) +
+    #remove the color legend 
+  guides(color = "none") +
+  theme_bw() +
+  theme(
+    strip.text.y = element_text(size = 8),
+    axis.text.y = element_text(size = 8),
+    panel.spacing.y = unit(0.45, "lines"),
+    plot.margin = margin(5.5, 140, 5.5, 5.5),
+    legend.position = "right"
+  )
+
+p_species_B <- p_species_B +
+theme_bold_large
+
+
+ggsave("Fig4.A.P1_sp.tiff", plot = p_species_A, height = 8, width = 12)
+ggsave("Fig4.B.P2_sp.tiff", plot = p_species_B, height = 8, width = 12)
+
+p_species_A / p_species_B + plot_layout(heights = c(1, 2))
+
+pathway_panel_labels
+
+
+#plain-text quick-read version of the facet summaries
+panel_B_summary_text <- pathway_panel_labels %>%
+  arrange(pathway_label) %>%
+  transmute(
+    line = paste0(
+      pathway_label, ": ",
+      "Top winner = ", top_winner,
+      " (", scales::percent(top_winner_share, accuracy = 1), " of genes; ",
+      round(top_winner_enrichment, 2), "\u00D7 vs pathway opportunity); ",
+      "Top2 share = ", scales::percent(top2_winner_share, accuracy = 1), "; ",
+      "Effective winners = ", round(effective_n_winners, 1)
+    )
+  ) %>%
+  pull(line) %>%
+  paste(collapse = "\n")
+
+panel_B_summary_text <- pathway_panel_labels %>%
+  arrange(pathway_label) %>%
+  transmute(
+    line = paste0(
+      pathway_label, ": ",
+      "Top winner = ", top_winner,
+      " (", scales::percent(top_winner_share, accuracy = 1), " of genes; ",
+      round(top_winner_enrichment, 2), "\u00D7 vs Functional Category opportunity); ",
+      "Top2 share = ", scales::percent(top2_winner_share, accuracy = 1), "; ",
+      "Effective winners = ", round(effective_n_winners, 1)
+    )
+  ) %>%
+  pull(line) %>%
+  paste(collapse = "\n")
+
+
+summary_text_plot <- patchwork::wrap_elements(
+  grid::textGrob(
+    panel_B_summary_text,
+    x = 0, hjust = 0,
+    y = 1, vjust = 1,
+    gp = grid::gpar(fontsize = 9)
+  )
+)
+summary_text_plot
+
+writeLines(panel_B_summary_text, "panel_B_summarySpecies.txt", useBytes = TRUE)
+
+ggplot2::ggsave(
+  filename = "panel_B_summary_plot_species.png",
+  plot = summary_text_plot,
+  width = 9,
+  height = 1,
+  dpi = 300
+)
+
+
+```
+
+
+
+### FIGURE 4B: primate lineage comparisons
+
+
+```{r}
+
+clade_palette <- c(
+  "Cercopithecoidea" = "#0072B2",  # deep blue
+  "Hominoidea"        = "#D55E00", # vermillion
+  "Platyrrhini"       = "#009E73", # bluish green
+  "Strepsirrhini"     = "#CC79A7", # reddish purple
+  "Tarsiiformes"      = "#F0E442"  # yellow
+)
+
+
+###clade-first companion, updated to match species view
+# positive-branch-only version
+
+BASELINE_CAP   <- 100
+SIG_Q_THRESH   <- 0.10
+TOP_N_PER_PATH <- 10
+
+hominoidea <- c(
+  "homo_sapiens","pan_troglodytes","pan_paniscus",
+  "gorilla_gorilla","pongo_abelii","nomascus_leucogenys"
+)
+
+cercopithecoidea <- c(
+  "chlorocebus_sabaeus","macaca_mulatta","macaca_fascicularis",
+  "macaca_nemestrina","papio_anubis","colobus_angolensis_palliatus",
+  "cercocebus_atys","theropithecus_gelada"
+)
+
+platyrrhini <- c(
+  "callithrix_jacchus","saimiri_boliviensis_boliviensis","aotus_nancymaae"
+)
+
+strepsirrhini <- c(
+  "microcebus_murinus","prolemur_simus","propithecus_coquereli"
+)
+
+tarsiiformes <- c("carlito_syrichta")
+
+clade_sizes <- tibble(
+  clade = c("Hominoidea","Cercopithecoidea","Platyrrhini","Strepsirrhini","Tarsiiformes"),
+  n_species_clade = c(
+    length(hominoidea),
+    length(cercopithecoidea),
+    length(platyrrhini),
+    length(strepsirrhini),
+    length(tarsiiformes)
+  )
+)
+
+absrel_clean <- exorcise(absrel_clean, "gene")
+
+
+####parse retained absrel observations ONCE
+#    and define POSITIVE branches only
+branch_dat <- absrel_clean %>%
+  filter(
+    !is.na(branch_id),
+    !str_detect(branch_id, "^NODE"),
+    !is.na(aBSREL_baseline_omega),
+    !is.na(pathway_label)
+  ) %>%
+  extract(
+    col   = branch_id,
+    into  = c("branch_gene", "species", "ensembl_tx", "ensembl_pep", "isoform_class"),
+    regex = "^([^_]+)_([A-Za-z]+_[A-Za-z]+(?:_[A-Za-z]+)?)_([^_]+)_([^_]+)_(CANONICAL|ALTERNATIVE)$",
+    remove = FALSE
+  ) %>%
+  mutate(
+    species = coalesce(
+      species,
+      sub(".*_([A-Za-z]+_[A-Za-z]+(?:_[A-Za-z]+)?)_.*", "\\1", branch_id)
+    ),
+    species = tolower(species),
+    clade = case_when(
+      species %in% hominoidea ~ "Hominoidea",
+      species %in% cercopithecoidea ~ "Cercopithecoidea",
+      species %in% platyrrhini ~ "Platyrrhini",
+      species %in% strepsirrhini ~ "Strepsirrhini",
+      species %in% tarsiiformes ~ "Tarsiiformes",
+      TRUE ~ "Other"
+    ),
+    q_use = dplyr::coalesce(q_global, aBSREL_pvalue_corrected),
+    sig = !is.na(q_use) & q_use <= SIG_Q_THRESH,
+    omega_pos = aBSREL_baseline_omega,
+    omega_cap = pmin(omega_pos, BASELINE_CAP),
+    pos_branch = sig & !is.na(omega_pos) & omega_pos > 1
+  ) %>%
+  filter(
+    clade != "Other",
+    pos_branch
+  )
+
+# PANEL A
+# pathway-level winner using SUMMED capped branch omega by clade among pos branches
+pathway_clade_sum <- branch_dat %>%
+  group_by(pathway_label, clade) %>%
+  summarise(
+    clade_contrib = sum(omega_cap, na.rm = TRUE),
+    median_omega_cap = median(omega_cap, na.rm = TRUE),
+    max_omega_cap = max(omega_cap, na.rm = TRUE),
+    n_pos_branches = n(),
+    min_q_clade = suppressWarnings(min(q_use, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    min_q_clade = ifelse(is.infinite(min_q_clade), NA_real_, min_q_clade)
+  )
+
+winner_clade_by_pathway <- pathway_clade_sum %>%
+  group_by(pathway_label) %>%
+  slice_max(order_by = clade_contrib, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(clade_contrib) %>%
+  mutate(
+    pathway_label = factor(pathway_label, levels = pathway_label),
+    label = if_else(
+      !is.na(min_q_clade) & min_q_clade < 0.05,
+      paste0(clade, " q=", signif(min_q_clade, 2)),
+      clade
+    )
+  )
+
+#removes label next to q value
+
+# winner_clade_by_pathway <- winner_clade_by_pathway %>%
+#   mutate(
+#     label = if_else(
+#       !is.na(min_q_clade) & min_q_clade < 0.05,
+#       paste0("q=", signif(min_q_clade, 2)),
+#       ""
+#     )
+#   )
+
+
+
+# remove q scores
+
+winner_clade_by_pathway <- winner_clade_by_pathway %>%
+  mutate(
+    label = clade 
+  )
+ 
+#reorder labels
+
+winner_clade_by_pathway$pathway_label <- factor(winner_clade_by_pathway$pathway_label, levels = category_order)
+
+#title
+
+    # title = "A. Winning clade per pathway"
+
+
+
+p1 <- ggplot(
+  winner_clade_by_pathway,
+  aes(x = clade_contrib, y = pathway_label, color = clade, size = n_pos_branches)
+) +
+  geom_segment(
+    aes(x = 0, xend = clade_contrib, yend = pathway_label),
+    color = "grey70", linewidth = 0.4
+  ) +
+  geom_point() +
+  geom_text(
+    aes(label = label),
+    size = 3.4,
+    color = "#3C3C3C",
+    hjust= - 0.18,
+    fontface = "bold"
+  ) +
+    scale_color_manual(values = clade_palette) +
+  coord_cartesian(clip = "off") +
+  labs(
+    x = paste0("Summed capped branch ω by clade (positive branches only; cap = ", BASELINE_CAP, ")"),
+    y = "Functional Category",
+    color = "Winning clade",
+    size = "Positive\nbranches",
+    # title = "A. Winning clade per pathway"
+  ) +
+  scale_x_continuous(
+  limits = c(0, max(winner_clade_by_pathway$clade_contrib) * 1.25),
+  expand = expansion(mult = c(0, 0.02))
+) +
+   #remove the color legend 
+  guides(color = "none") +
+  theme_bw() +
+  theme(
+    plot.margin = margin(5.5, 120, 5.5, 5.5),
+    legend.position = "right"
+  )
+
+p1 <- p1 +
+  theme_bold_large1
+# PANEL B
+# winning clade for each top-branch gene within each pathway
+# integrated with pathway-level concentration summary
+
+
+# top genes per pathway based on positive branches only
+top_genes <- branch_dat %>%
+  group_by(pathway_label) %>%
+  slice_max(order_by = omega_cap, n = TOP_N_PER_PATH, with_ties = TRUE) %>%
+  ungroup() %>%
+  distinct(pathway_label, gene)
+
+# species-level collapse within gene first
+gene_species_clade <- branch_dat %>%
+  semi_join(top_genes, by = c("pathway_label", "gene")) %>%
+  group_by(pathway_label, gene, clade, species) %>%
+  summarise(
+    species_max_omega = max(omega_cap, na.rm = TRUE),
+    n_pos_branches_species = n(),
+    min_q_species = suppressWarnings(min(q_use, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    min_q_species = ifelse(is.infinite(min_q_species), NA_real_, min_q_species)
+  )
+
+# normalized clade score within gene
+gene_clade_norm <- gene_species_clade %>%
+  group_by(pathway_label, gene, clade) %>%
+  summarise(
+    n_species_obs = n_distinct(species),
+    n_pos_branches = sum(n_pos_branches_species, na.rm = TRUE),
+    median_omega_cap = median(species_max_omega, na.rm = TRUE),
+    max_omega_cap = max(species_max_omega, na.rm = TRUE),
+    min_q_clade = suppressWarnings(min(min_q_species, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    min_q_clade = ifelse(is.infinite(min_q_clade), NA_real_, min_q_clade)
+  ) %>%
+  left_join(clade_sizes, by = "clade") %>%
+  mutate(
+    prop_obs = n_species_obs / n_species_clade,
+    gene_pathway = paste(pathway_label, gene, sep = "___")
+  )
+
+# winning clade per gene
+winner_clade_per_gene <- gene_clade_norm %>%
+  group_by(pathway_label, gene, gene_pathway) %>%
+  arrange(
+    desc(prop_obs),
+    desc(n_pos_branches),
+    clade,
+    .by_group = TRUE
+  ) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  mutate(
+    label = if_else(
+      !is.na(min_q_clade) & min_q_clade < 0.05,
+      paste0(clade, " q=", signif(min_q_clade, 2)),
+      clade
+    )
+  )
+
+# pathway-level positive-branch opportunity by clade
+pathway_clade_opportunity <- branch_dat %>%
+  group_by(pathway_label, clade) %>%
+  summarise(
+    n_pos_branches_path_clade = n(),
+    .groups = "drop"
+  ) %>%
+  group_by(pathway_label) %>%
+  mutate(
+    expected_share = n_pos_branches_path_clade / sum(n_pos_branches_path_clade)
+  ) %>%
+  ungroup()
+
+# concentration summary for winner assignments within each pathway
+pathway_winner_summary <- winner_clade_per_gene %>%
+  count(pathway_label, clade, name = "winner_n") %>%
+  group_by(pathway_label) %>%
+  mutate(
+    winner_share = winner_n / sum(winner_n)
+  ) %>%
+  ungroup() %>%
+  left_join(
+    pathway_clade_opportunity,
+    by = c("pathway_label", "clade")
+  ) %>%
+  mutate(
+    winner_enrichment = winner_share / expected_share
+  )
+
+pathway_panel_labels <- pathway_winner_summary %>%
+  group_by(pathway_label) %>%
+  arrange(desc(winner_share), clade, .by_group = TRUE) %>%
+  summarise(
+    top_winner = first(clade),
+    top_winner_share = first(winner_share),
+    top_winner_enrichment = first(winner_enrichment),
+    top2_winner_share = sum(head(winner_share, 2)),
+    effective_n_winners = 1 / sum(winner_share^2),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pathway_panel = paste0(
+      pathway_label,
+      "\nTop winner: ", top_winner,
+      " (", scales::percent(top_winner_share, accuracy = 1), " of genes; ",
+      round(top_winner_enrichment, 2), "\u00D7 vs pathway opportunity)",
+      "\nTop2 share: ", scales::percent(top2_winner_share, accuracy = 1),
+      "; Effective winners: ", round(effective_n_winners, 1)
+    )
+  )
+
+winner_clade_per_gene <- winner_clade_per_gene %>%
+  left_join(
+    pathway_panel_labels %>% select(pathway_label, pathway_panel),
+    by = "pathway_label"
+  )
+
+gene_levels <- winner_clade_per_gene %>%
+  group_by(pathway_label) %>%
+  arrange(prop_obs, .by_group = TRUE) %>%
+  ungroup() %>%
+  pull(gene_pathway)
+
+winner_clade_per_gene <- winner_clade_per_gene %>%
+  mutate(
+    gene_pathway = factor(gene_pathway, levels = unique(gene_levels)),
+    pathway_panel = factor(pathway_panel, levels = unique(pathway_panel_labels$pathway_panel))
+  )
+
+#this removes clade name from q value label
+
+# winner_clade_per_gene <- winner_clade_per_gene %>%
+#   mutate(
+#     label = if_else(
+#       !is.na(min_q_clade) & min_q_clade < 0.05,
+#       paste0("q=", signif(min_q_clade, 2)),
+#       ""
+#     )
+#   )
+
+
+# remove q scores
+
+winner_clade_per_gene <- winner_clade_per_gene %>%
+  mutate(
+    label = clade 
+  )
+ 
+#reorder labels
+
+winner_clade_per_gene$pathway_label <- factor(winner_clade_per_gene$pathway_label, levels = category_orderb)
+
+#title
+
+    # title = paste0(
+    #   "B. Winning clade for each top-branch gene within each pathway",
+    #   " (genes containing a top ", TOP_N_PER_PATH, " capped-ω positive branch)"
+    # )
+
+
+
+p2 <- ggplot(
+  winner_clade_per_gene,
+  aes(x = prop_obs, y = gene_pathway, color = clade, size = n_pos_branches)
+) +
+  geom_segment(
+    aes(x = 0, xend = prop_obs, yend = gene_pathway),
+    color = "grey70",
+    linewidth = 0.4
+  ) +
+  geom_point() +
+  geom_text(
+    aes(label = label),
+    size = 2.9,
+    color = "#3C3C3C",
+    hjust= - 0.11,
+    fontface = "bold"
+  ) +
+    scale_color_manual(values = clade_palette) +
+  facet_grid(pathway_label ~ ., scales = "free_y", space = "free_y") +
+  scale_y_discrete(labels = function(x) sub("^.*___", "", x)) +
+  coord_cartesian(clip = "off") +
+  labs(
+    x = "Winning represented fraction among positive branches",
+    y = "Gene",
+    color = "Winning clade",
+    size = "Positive\nbranches",
+    # title = paste0(
+    #   "B. Winning clade for each top-branch gene within each pathway",
+    #   " (genes containing a top ", TOP_N_PER_PATH, " capped-ω positive branch)"
+    # )
+  ) +
+  scale_x_continuous(
+  limits = c(0, max(winner_clade_per_gene$prop_obs) * 1.25),
+  expand = expansion(mult = c(0, 0.02))
+) +
+  #remove the color legend 
+  guides(color = "none") +
+  theme_bw() +
+  theme(
+    strip.text.y = element_text(size = 8),
+    axis.text.y = element_text(size = 8),
+    panel.spacing.y = unit(0.45, "lines"),
+    plot.margin = margin(5.5, 140, 5.5, 5.5),
+    legend.position = "right"
+  )
+
+p2 <- p2 +
+theme_bold_large 
+
+ggsave("Fig4.C.P1_Clade.tiff", plot = p1, height = 8, width = 12)
+ggsave("Fig4.D.P2_Clade.tiff", plot = p2, height = 8, width = 12)
+
+
+p1 / p2 + plot_layout(heights = c(1, 2))
+
+pathway_panel_labels
+
+
+# plain-text quick-read version of the facet summaries
+panel_B_summary_text <- pathway_panel_labels %>%
+  arrange(pathway_label) %>%
+  transmute(
+    line = paste0(
+      pathway_label, ": ",
+      "Top winner = ", top_winner,
+      " (", scales::percent(top_winner_share, accuracy = 1), " of genes; ",
+      round(top_winner_enrichment, 2), "\u00D7 vs pathway opportunity); ",
+      "Top2 share = ", scales::percent(top2_winner_share, accuracy = 1), "; ",
+      "Effective winners = ", round(effective_n_winners, 1)
+    )
+  ) %>%
+  pull(line) %>%
+  paste(collapse = "\n")
+
+panel_B_summary_text <- pathway_panel_labels %>%
+  arrange(pathway_label) %>%
+  transmute(
+    line = paste0(
+      pathway_label, ": ",
+      "Top winner = ", top_winner,
+      " (", scales::percent(top_winner_share, accuracy = 1), " of genes; ",
+      round(top_winner_enrichment, 2), "\u00D7 vs Functional Category opportunity); ",
+      "Top2 share = ", scales::percent(top2_winner_share, accuracy = 1), "; ",
+      "Effective winners = ", round(effective_n_winners, 1)
+    )
+  ) %>%
+  pull(line) %>%
+  paste(collapse = "\n")
+
+
+summary_text_plot <- patchwork::wrap_elements(
+  grid::textGrob(
+    panel_B_summary_text,
+    x = 0, hjust = 0,
+    y = 1, vjust = 1,
+    gp = grid::gpar(fontsize = 9)
+  )
+)
+summary_text_plot
+
+writeLines(panel_B_summary_text, "panel_B_summaryCLADE.txt", useBytes = TRUE)
+
+ggplot2::ggsave(
+  filename = "panel_B_summary_plot_clade.png",
+  plot = summary_text_plot,
+  width = 9,
+  height = 1,
+  dpi = 300
+)
+
+
+```
+
+
+
+
+
+### FIGURE 4C: diet
+
+
+```{r}
+#diet-group companion, winner-style and positive-branch-only
+
+diet_pallette <- c ("Omnivore" = "blue", "Folivore" = "green" , "", "Frugivore" = "orange", "Carnivore" = "pink")
+
+BASELINE_CAP   <- 100
+SIG_Q_THRESH   <- 0.10
+TOP_N_PER_PATH <- 10
+
+omni_species <- c(
+  "MACACA_MULATTA",
+  "MACACA_FASCICULARIS",
+  "MACACA_NEMESTRINA",
+  "PAPIO_ANUBIS",
+  "CERCOCEBUS_ATYS",
+  "CHLOROCEBUS_SABAEUS",
+  "MICROCEBUS_MURINUS",
+  "SAIMIRI_BOLIVIENSIS_BOLIVIENSIS",
+  "CALLITHRIX_JACCHUS",
+  "HOMO_SAPIENS"
+)
+
+foli_species <- c(
+  "COLOBUS_ANGOLENSIS_PALLIATUS",
+  "GORILLA_GORILLA",
+  "PROPITHECUS_COQUERELI",
+  "PROLEMUR_SIMUS",
+  "THEROPITHECUS_GELADA"
+)
+
+frugi_species <- c(
+  "PONGO_ABELII",
+  "AOTUS_NANCYMAAE",
+  "NOMASCUS_LEUCOGENYS",
+  "PAN_TROGLODYTES",
+  "PAN_PANISCUS"
+)
+
+carni_species <- c(
+  "CARLITO_SYRICHTA"
+)
+
+diet_sizes <- tibble(
+  diet_group = c("Omnivore", "Folivore", "Frugivore", "Carnivore"),
+  n_species_group = c(
+    length(omni_species),
+    length(foli_species),
+    length(frugi_species),
+    length(carni_species)
+  )
+)
+
+absrel_clean <- exorcise(absrel_clean, "gene")
+
+
+##choose coorexcted qval column
+absrel_work <- absrel_clean
+
+if ("q_global" %in% names(absrel_work)) {
+  absrel_work$q_use <- absrel_work$q_global
+} else if ("aBSREL_pvalue_corrected" %in% names(absrel_work)) {
+  absrel_work$q_use <- absrel_work$aBSREL_pvalue_corrected
+} else {
+  stop("Need either q_global or aBSREL_pvalue_corrected in absrel_clean.")
+}
+
+
+#### parse retained observations ONCE and define POSITIVE branches only
+branch_dat <- absrel_work %>%
+  filter(
+    !is.na(branch_id),
+    !str_detect(branch_id, "^NODE"),
+    !is.na(aBSREL_baseline_omega),
+    !is.na(pathway_label)
+  ) %>%
+  extract(
+    col   = branch_id,
+    into  = c("branch_gene", "species", "ensembl_tx", "ensembl_pep", "isoform_class"),
+    regex = "^([^_]+)_([A-Za-z]+_[A-Za-z]+(?:_[A-Za-z]+)?)_([^_]+)_([^_]+)_(CANONICAL|ALTERNATIVE)$",
+    remove = FALSE
+  ) %>%
+  mutate(
+    species = coalesce(
+      species,
+      sub(".*_([A-Za-z]+_[A-Za-z]+(?:_[A-Za-z]+)?)_.*", "\\1", branch_id)
+    ),
+    species = toupper(species),
+    diet_group = case_when(
+      species %in% omni_species  ~ "Omnivore",
+      species %in% foli_species  ~ "Folivore",
+      species %in% frugi_species ~ "Frugivore",
+      species %in% carni_species ~ "Carnivore",
+      TRUE ~ "Other"
+    ),
+    sig = !is.na(q_use) & q_use <= SIG_Q_THRESH,
+    omega_pos = aBSREL_baseline_omega,
+    omega_cap = pmin(omega_pos, BASELINE_CAP),
+    pos_branch = sig & !is.na(omega_pos) & omega_pos > 1
+  ) %>%
+  filter(
+    diet_group != "Other",
+    pos_branch
+  )
+
+# PANEL A
+# pathway-level winner using SUMMED capped branch omega by diet group
+# among positive branches only
+
+pathway_diet_sum <- branch_dat %>%
+  group_by(pathway_label, diet_group) %>%
+  summarise(
+    group_contrib = sum(omega_cap, na.rm = TRUE),
+    median_omega_cap = median(omega_cap, na.rm = TRUE),
+    max_omega_cap = max(omega_cap, na.rm = TRUE),
+    n_pos_branches = n(),
+    min_q_group = suppressWarnings(min(q_use, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    min_q_group = ifelse(is.infinite(min_q_group), NA_real_, min_q_group)
+  )
+
+winner_diet_by_pathway <- pathway_diet_sum %>%
+  group_by(pathway_label) %>%
+  slice_max(order_by = group_contrib, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(group_contrib) %>%
+  mutate(
+    pathway_label = factor(pathway_label, levels = pathway_label),
+    label = if_else(
+      !is.na(min_q_group) & min_q_group < 0.05,
+      paste0(diet_group, " q=", signif(min_q_group, 2)),
+      diet_group
+    )
+  )
+
+#removes label next to q value
+
+# winner_diet_by_pathway <- winner_diet_by_pathway %>%
+#   mutate(
+#     label = if_else(
+#       !is.na(min_q_group) & min_q_group < 0.05,
+#       paste0("q=", signif(min_q_group, 2)),
+#       ""
+#     )
+#   )
+
+
+# remove q scores
+
+winner_diet_by_pathway <- winner_diet_by_pathway %>%
+  mutate(
+    label = diet_group  
+  )
+ 
+#reorder labels
+
+winner_diet_by_pathway$pathway_label <- factor(winner_diet_by_pathway$pathway_label, levels = category_order)
+
+#title
+
+  # title = "A. Winning diet group per pathway"
+
+
+p1 <- ggplot(
+  winner_diet_by_pathway,
+  aes(x = group_contrib, y = pathway_label, color = diet_group, size = n_pos_branches)
+) +
+  geom_segment(
+    aes(x = 0, xend = group_contrib, yend = pathway_label),
+    color = "grey70",
+    linewidth = 0.4
+  ) +
+  geom_point() +
+  geom_text(
+    aes(label = label),
+    size = 3.4,
+    color = "#3C3C3C",
+    hjust= - 0.15,
+    fontface = "bold"
+  ) +
+  coord_cartesian(clip = "off") +
+   scale_color_manual(values = diet_pallette) +
+  labs(
+    x = paste0("Summed capped branch \u03C9 by diet group (positive branches only; cap = ", BASELINE_CAP, ")"),
+    y = "Functional Category",
+    color = "Winning diet group",
+    size = "Positive\nbranches",
+    # title = "A. Winning diet group per pathway"
+  ) +
+  scale_x_continuous(
+  limits = c(0, max(winner_diet_by_pathway$group_contrib) * 1.25),
+  expand = expansion(mult = c(0, 0.02))
+) +
+   #remove the color legend 
+  guides(color = "none") +
+  theme_bw() +
+  theme(
+    plot.margin = margin(5.5, 120, 5.5, 5.5),
+    legend.position = "right"
+  )
+
+p1 <- p1 +
+ theme_bold_large1
+
+# PANEL B
+# winning diet group for each top-branch gene within each pathway
+# integrated with pathway-level concentration summary
+# top genes per pathway based on positive branches only
+top_genes <- branch_dat %>%
+  group_by(pathway_label) %>%
+  slice_max(order_by = omega_cap, n = TOP_N_PER_PATH, with_ties = TRUE) %>%
+  ungroup() %>%
+  distinct(pathway_label, gene)
+
+# species-level collapse within gene first
+gene_species_diet <- branch_dat %>%
+  semi_join(top_genes, by = c("pathway_label", "gene")) %>%
+  group_by(pathway_label, gene, diet_group, species) %>%
+  summarise(
+    species_max_omega = max(omega_cap, na.rm = TRUE),
+    n_pos_branches_species = n(),
+    min_q_species = suppressWarnings(min(q_use, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    min_q_species = ifelse(is.infinite(min_q_species), NA_real_, min_q_species)
+  )
+
+# normalized diet-group representation within gene
+gene_diet_norm <- gene_species_diet %>%
+  group_by(pathway_label, gene, diet_group) %>%
+  summarise(
+    n_species_obs = n_distinct(species),
+    n_pos_branches = sum(n_pos_branches_species, na.rm = TRUE),
+    median_omega_cap = median(species_max_omega, na.rm = TRUE),
+    max_omega_cap = max(species_max_omega, na.rm = TRUE),
+    min_q_group = suppressWarnings(min(min_q_species, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    min_q_group = ifelse(is.infinite(min_q_group), NA_real_, min_q_group)
+  ) %>%
+  left_join(diet_sizes, by = "diet_group") %>%
+  mutate(
+    prop_obs = n_species_obs / n_species_group,
+    gene_pathway = paste(pathway_label, gene, sep = "___")
+  )
+
+# winning diet group per gene
+winner_diet_per_gene <- gene_diet_norm %>%
+  group_by(pathway_label, gene, gene_pathway) %>%
+  arrange(
+    desc(prop_obs),
+    desc(n_pos_branches),
+    diet_group,
+    .by_group = TRUE
+  ) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  mutate(
+    label = if_else(
+      !is.na(min_q_group) & min_q_group < 0.05,
+      paste0(diet_group, " q=", signif(min_q_group, 2)),
+      diet_group
+    )
+  )
+
+# pathway-level positive-branch opportunity by diet group
+pathway_diet_opportunity <- branch_dat %>%
+  group_by(pathway_label, diet_group) %>%
+  summarise(
+    n_pos_branches_path_group = n(),
+    .groups = "drop"
+  ) %>%
+  group_by(pathway_label) %>%
+  mutate(
+    expected_share = n_pos_branches_path_group / sum(n_pos_branches_path_group)
+  ) %>%
+  ungroup()
+
+# concentration summary for winner assignments within each pathway
+pathway_winner_summary <- winner_diet_per_gene %>%
+  count(pathway_label, diet_group, name = "winner_n") %>%
+  group_by(pathway_label) %>%
+  mutate(
+    winner_share = winner_n / sum(winner_n)
+  ) %>%
+  ungroup() %>%
+  left_join(
+    pathway_diet_opportunity,
+    by = c("pathway_label", "diet_group")
+  ) %>%
+  mutate(
+    winner_enrichment = winner_share / expected_share
+  )
+
+pathway_panel_labels <- pathway_winner_summary %>%
+  group_by(pathway_label) %>%
+  arrange(desc(winner_share), diet_group, .by_group = TRUE) %>%
+  summarise(
+    top_winner = first(diet_group),
+    top_winner_share = first(winner_share),
+    top_winner_enrichment = first(winner_enrichment),
+    top2_winner_share = sum(head(winner_share, 2)),
+    effective_n_winners = 1 / sum(winner_share^2),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pathway_panel = paste0(
+      pathway_label,
+      "\nTop winner: ", top_winner,
+      " (", scales::percent(top_winner_share, accuracy = 1), " of genes; ",
+      round(top_winner_enrichment, 2), "\u00D7 vs pathway opportunity)",
+      "\nTop2 share: ", scales::percent(top2_winner_share, accuracy = 1),
+      "; Effective winners: ", round(effective_n_winners, 1)
+    )
+  )
+
+winner_diet_per_gene <- winner_diet_per_gene %>%
+  left_join(
+    pathway_panel_labels %>% select(pathway_label, pathway_panel),
+    by = "pathway_label"
+  )
+
+gene_levels <- winner_diet_per_gene %>%
+  group_by(pathway_label) %>%
+  arrange(prop_obs, .by_group = TRUE) %>%
+  ungroup() %>%
+  pull(gene_pathway)
+
+winner_diet_per_gene <- winner_diet_per_gene %>%
+  mutate(
+    gene_pathway = factor(gene_pathway, levels = unique(gene_levels)),
+    pathway_panel = factor(pathway_panel, levels = unique(pathway_panel_labels$pathway_panel))
+  )
+
+# this removes diet label next to q value
+
+# winner_diet_per_gene <- winner_diet_per_gene %>%
+#   mutate(
+#     label = if_else(
+#       !is.na(min_q_group) & min_q_group < 0.05,
+#       paste0("q=", signif(min_q_group, 2)),
+#       ""
+#     )
+#   )
+
+
+
+# remove q scores
+
+winner_diet_per_gene <- winner_diet_per_gene %>%
+  mutate(
+    label = diet_group  
+  )
+ 
+#reorder labels
+
+winner_diet_per_gene$pathway_label <- factor(winner_diet_per_gene$pathway_label, levels = category_orderb)
+
+#title
+
+    # title = paste0(
+    #   "B. Winning diet group for each top-branch gene within each pathway",
+    #   " (genes containing a top ", TOP_N_PER_PATH, " capped-\u03C9 positive branch)"
+    # )
+
+
+p2 <- ggplot(
+  winner_diet_per_gene,
+  aes(x = prop_obs, y = gene_pathway, color = diet_group, size = n_pos_branches)
+) +
+  geom_segment(
+    aes(x = 0, xend = prop_obs, yend = gene_pathway),
+    color = "grey70",
+    linewidth = 0.4
+  ) +
+  geom_point() +
+  geom_text(
+    aes(label = label),
+    size = 3.2,
+    color = "#3C3C3C",
+    hjust= - 0.15,
+    fontface = "bold"
+  ) +
+  facet_grid(pathway_label ~ ., scales = "free_y", space = "free_y") +
+  scale_y_discrete(labels = function(x) sub("^.*___", "", x)) +
+  coord_cartesian(clip = "off") +
+  scale_color_manual(values = diet_pallette) +
+  labs(
+    x = "Winning share of positive branches within gene",
+    y = "Gene",
+    color = "Winning diet group",
+    size = "Positive\nbranches",
+    # title = paste0(
+    #   "B. Winning diet group for each top-branch gene within each pathway",
+    #   " (genes containing a top ", TOP_N_PER_PATH, " capped-\u03C9 positive branch)"
+    # )
+  ) +
+  coord_cartesian(clip = "off") +
+  scale_x_continuous(
+  limits = c(0, max(winner_diet_per_gene$prop_obs) * 1.25),
+  expand = expansion(mult = c(0, 0.02))
+) +
+    #remove the color legend 
+  guides(color = "none") +
+  theme_bw() +
+  theme(
+    strip.text.y = element_text(size = 8),
+    axis.text.y = element_text(size = 8),
+    panel.spacing.y = unit(0.45, "lines"),
+    plot.margin = margin(5.5, 140, 5.5, 5.5),
+    legend.position = "right"
+  )
+
+p2 <- p2 +
+  theme_bold_large
+
+ggsave("Fig4.E.P1_Diet.tiff", plot = p1, height = 8, width = 12)
+ggsave("Fig4.F.P2_Diet.tiff", plot = p2, height = 8, width = 12)
+
+p1 / p2 + plot_layout(heights = c(1, 2))
+
+pathway_panel_labels
+
+
+
+# plain-text quick-read version of the facet summaries
+panel_B_summary_text <- pathway_panel_labels %>%
+  arrange(pathway_label) %>%
+  transmute(
+    line = paste0(
+      pathway_label, ": ",
+      "Top winner = ", top_winner,
+      " (", scales::percent(top_winner_share, accuracy = 1), " of genes; ",
+      round(top_winner_enrichment, 2), "\u00D7 vs pathway opportunity); ",
+      "Top2 share = ", scales::percent(top2_winner_share, accuracy = 1), "; ",
+      "Effective winners = ", round(effective_n_winners, 1)
+    )
+  ) %>%
+  pull(line) %>%
+  paste(collapse = "\n")
+
+panel_B_summary_text <- pathway_panel_labels %>%
+  arrange(pathway_label) %>%
+  transmute(
+    line = paste0(
+      pathway_label, ": ",
+      "Top winner = ", top_winner,
+      " (", scales::percent(top_winner_share, accuracy = 1), " of genes; ",
+      round(top_winner_enrichment, 2), "\u00D7 vs Functional Category opportunity); ",
+      "Top2 share = ", scales::percent(top2_winner_share, accuracy = 1), "; ",
+      "Effective winners = ", round(effective_n_winners, 1)
+    )
+  ) %>%
+  pull(line) %>%
+  paste(collapse = "\n")
+
+
+summary_text_plot <- patchwork::wrap_elements(
+  grid::textGrob(
+    panel_B_summary_text,
+    x = 0, hjust = 0,
+    y = 1, vjust = 1,
+    gp = grid::gpar(fontsize = 9)
+  )
+)
+summary_text_plot
+
+writeLines(panel_B_summary_text, "panel_B_summaryDIET.txt", useBytes = TRUE)
+
+ggplot2::ggsave(
+  filename = "panel_B_summary_plot_diet.png",
+  plot = summary_text_plot,
+  width = 9,
+  height = 1,
+  dpi = 300
+)
+
+
+```
+
+
+
+
+
+
+### FIGURE 4D: EQ
+
+
+
+```{r}
+
+BASELINE_CAP   <- 100
+SIG_Q_THRESH   <- 0.10
+TOP_N_PER_PATH <- 10
+
+EQ_pallette <- c("EQlow" = "red", "EQmed" = "blue", "EQhigh" = "green")
+
+
+EQlow <- c(
+  "COLOBUS_ANGOLENSIS_PALLIATUS",
+  "MICROCEBUS_MURINUS",
+  "AOTUS_NANCYMAAE",
+  "THEROPITHECUS_GELADA",
+  "CALLITHRIX_JACCHUS",
+  "CARLITO_SYRICHTA",
+  "PROPITHECUS_COQUERELI"
+)
+
+EQmed <- c(
+  "MACACA_MULATTA",
+  "MACACA_FASCICULARIS",
+  "MACACA_NEMESTRINA",
+  "PROLEMUR_SIMUS",
+  "GORILLA_GORILLA",
+  "CERCOCEBUS_ATYS",
+  "CHLOROCEBUS_SABAEUS"
+)
+
+EQhigh <- c(
+  "HOMO_SAPIENS",
+  "SAIMIRI_BOLIVIENSIS_BOLIVIENSIS",
+  "NOMASCUS_LEUCOGENYS",
+  "PAN_TROGLODYTES",
+  "PAN_PANISCUS",
+  "PONGO_ABELII",
+  "PAPIO_ANUBIS"
+)
+
+
+eq_sizes <- tibble(
+  eq_group = c("EQlow", "EQmed", "EQhigh"),
+  n_species_group = c(length(EQlow), length(EQmed), length(EQhigh))
+)
+
+absrel_clean <- exorcise(absrel_clean, "gene")
+
+
+##choose corrected q column once
+absrel_work <- absrel_clean
+
+if ("q_global" %in% names(absrel_work)) {
+  absrel_work$q_use <- absrel_work$q_global
+} else if ("aBSREL_pvalue_corrected" %in% names(absrel_work)) {
+  absrel_work$q_use <- absrel_work$aBSREL_pvalue_corrected
+} else {
+  stop("Need either q_global or aBSREL_pvalue_corrected in absrel_clean.")
+}
+
+
+###parse retained observations ONCE and define POSITIVE branches only
+branch_dat <- absrel_work %>%
+  filter(
+    !is.na(branch_id),
+    !str_detect(branch_id, "^NODE"),
+    !is.na(aBSREL_baseline_omega),
+    !is.na(pathway_label)
+  ) %>%
+  extract(
+    col   = branch_id,
+    into  = c("branch_gene", "species", "ensembl_tx", "ensembl_pep", "isoform_class"),
+    regex = "^([^_]+)_([A-Za-z]+_[A-Za-z]+(?:_[A-Za-z]+)?)_([^_]+)_([^_]+)_(CANONICAL|ALTERNATIVE)$",
+    remove = FALSE
+  ) %>%
+  mutate(
+    species = coalesce(
+      species,
+      sub(".*_([A-Za-z]+_[A-Za-z]+(?:_[A-Za-z]+)?)_.*", "\\1", branch_id)
+    ),
+    species = toupper(species),
+    species_tail = sub("^[^_]+_", "", species),
+    eq_group = case_when(
+      species %in% EQlow  | species_tail %in% EQlow  ~ "EQlow",
+      species %in% EQmed  | species_tail %in% EQmed  ~ "EQmed",
+      species %in% EQhigh | species_tail %in% EQhigh ~ "EQhigh",
+      TRUE ~ "Other"
+    ),
+    sig = !is.na(q_use) & q_use <= SIG_Q_THRESH,
+    omega_pos = aBSREL_baseline_omega,
+    omega_cap = pmin(omega_pos, BASELINE_CAP),
+    pos_branch = sig & !is.na(omega_pos) & omega_pos > 1
+  ) %>%
+  filter(
+    eq_group != "Other",
+    pos_branch
+  )
+
+#######pANEL A
+#pathway-level winner using SUMMED capped branch omega by EQ group
+#among positive branches only
+
+
+pathway_eq_sum <- branch_dat %>%
+  group_by(pathway_label, eq_group) %>%
+  summarise(
+    group_contrib = sum(omega_cap, na.rm = TRUE),
+    median_omega_cap = median(omega_cap, na.rm = TRUE),
+    max_omega_cap = max(omega_cap, na.rm = TRUE),
+    n_pos_branches = n(),
+    min_q_group = suppressWarnings(min(q_use, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    min_q_group = ifelse(is.infinite(min_q_group), NA_real_, min_q_group)
+  )
+
+winner_eq_by_pathway <- pathway_eq_sum %>%
+  group_by(pathway_label) %>%
+  slice_max(order_by = group_contrib, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(group_contrib) %>%
+  mutate(
+    pathway_label = factor(pathway_label, levels = pathway_label),
+    label = if_else(
+      !is.na(min_q_group) & min_q_group < 0.05,
+      paste0(eq_group, " q=", signif(min_q_group, 2)),
+      eq_group
+    )
+  )
+
+#removes label next to q value
+
+# winner_eq_by_pathway <- winner_eq_by_pathway %>%
+#   mutate(
+#     label = if_else(
+#       !is.na(min_q_group) & min_q_group < 0.05,
+#       paste0("q=", signif(min_q_group, 2)),
+#       ""
+#     )
+#   )
+
+
+# remove q scores
+
+winner_eq_by_pathway <- winner_eq_by_pathway %>%
+  mutate(
+    label = eq_group  
+  )
+ 
+#reorder labels
+
+winner_eq_by_pathway$pathway_label <- factor(winner_eq_by_pathway$pathway_label, levels = category_order)
+
+#title
+
+  # title = "A. Winning EQ group per pathway"
+
+p1 <- ggplot(
+  winner_eq_by_pathway,
+  aes(x = group_contrib, y = pathway_label, color = eq_group, size = n_pos_branches)
+) +
+  geom_segment(
+    aes(x = 0, xend = group_contrib, yend = pathway_label),
+    color = "grey70",
+    linewidth = 0.4
+  ) +
+  geom_point() +
+  geom_text(
+    aes(label = label),
+    size = 3.5,
+    color = "#3C3C3C",
+    hjust= - 0.2,
+    fontface = "bold"
+  ) +
+  coord_cartesian(clip = "off") +
+     scale_color_manual(values = EQ_pallette) +
+  labs(
+    x = paste0("Summed capped branch ω by EQ group (positive branches only; cap = ", BASELINE_CAP, ")"),
+    y = "Functional Category",
+    color = "Winning EQ group",
+    size = "Positive\nbranches",
+    # title = "A. Winning EQ group per pathway"
+  ) +
+  scale_x_continuous(
+  limits = c(0, max(winner_eq_by_pathway$group_contrib) * 1.25),
+  expand = expansion(mult = c(0, 0.02))
+) +
+   #remove the color legend 
+  guides(color = "none") +
+  theme_bw() +
+  theme(
+    plot.margin = margin(5.5, 120, 5.5, 5.5),
+    legend.position = "right"
+  )
+
+p1 <- p1 +
+  theme_bold_large1
+
+######PANEL B
+##### winning () EQ group for each top-branch gene within each pathway
+#integrated with pathway-level concentration summary
+
+
+#####top genes per pathway based on positive branches only
+top_genes <- branch_dat %>%
+  group_by(pathway_label) %>%
+  slice_max(order_by = omega_cap, n = TOP_N_PER_PATH, with_ties = TRUE) %>%
+  ungroup() %>%
+  distinct(pathway_label, gene)
+
+####species-level collapse within gene first
+gene_species_eq <- branch_dat %>%
+  semi_join(top_genes, by = c("pathway_label", "gene")) %>%
+  group_by(pathway_label, gene, eq_group, species) %>%
+  summarise(
+    species_max_omega = max(omega_cap, na.rm = TRUE),
+    n_pos_branches_species = n(),
+    min_q_species = suppressWarnings(min(q_use, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    min_q_species = ifelse(is.infinite(min_q_species), NA_real_, min_q_species)
+  )
+
+#####normalized EQ-group representation within gene
+gene_eq_norm <- gene_species_eq %>%
+  group_by(pathway_label, gene, eq_group) %>%
+  summarise(
+    n_species_obs = n_distinct(species),
+    n_pos_branches = sum(n_pos_branches_species, na.rm = TRUE),
+    median_omega_cap = median(species_max_omega, na.rm = TRUE),
+    max_omega_cap = max(species_max_omega, na.rm = TRUE),
+    min_q_group = suppressWarnings(min(min_q_species, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    min_q_group = ifelse(is.infinite(min_q_group), NA_real_, min_q_group)
+  ) %>%
+  left_join(eq_sizes, by = "eq_group") %>%
+  mutate(
+    prop_obs = n_species_obs / n_species_group,
+    gene_pathway = paste(pathway_label, gene, sep = "___")
+  )
+
+#######winning EQ group per gene
+winner_eq_per_gene <- gene_eq_norm %>%
+  group_by(pathway_label, gene, gene_pathway) %>%
+  arrange(
+    desc(prop_obs),
+    desc(n_pos_branches),
+    eq_group,
+    .by_group = TRUE
+  ) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  mutate(
+    label = if_else(
+      !is.na(min_q_group) & min_q_group < 0.05,
+      paste0(eq_group, " q=", signif(min_q_group, 2)),
+      eq_group
+    )
+  )
+
+#####pathway-level positive-branch opportunity by EQ group
+pathway_eq_opportunity <- branch_dat %>%
+  group_by(pathway_label, eq_group) %>%
+  summarise(
+    n_pos_branches_path_group = n(),
+    .groups = "drop"
+  ) %>%
+  group_by(pathway_label) %>%
+  mutate(
+    expected_share = n_pos_branches_path_group / sum(n_pos_branches_path_group)
+  ) %>%
+  ungroup()
+
+####concentration summary for winner assignments within each pathway
+pathway_winner_summary <- winner_eq_per_gene %>%
+  count(pathway_label, eq_group, name = "winner_n") %>%
+  group_by(pathway_label) %>%
+  mutate(
+    winner_share = winner_n / sum(winner_n)
+  ) %>%
+  ungroup() %>%
+  left_join(
+    pathway_eq_opportunity,
+    by = c("pathway_label", "eq_group")
+  ) %>%
+  mutate(
+    winner_enrichment = winner_share / expected_share
+  )
+
+pathway_panel_labels <- pathway_winner_summary %>%
+  group_by(pathway_label) %>%
+  arrange(desc(winner_share), eq_group, .by_group = TRUE) %>%
+  summarise(
+    top_winner = first(eq_group),
+    top_winner_share = first(winner_share),
+    top_winner_enrichment = first(winner_enrichment),
+    top2_winner_share = sum(head(winner_share, 2)),
+    effective_n_winners = 1 / sum(winner_share^2),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pathway_panel = paste0(
+      pathway_label,
+      "\nTop winner: ", top_winner,
+      " (", scales::percent(top_winner_share, accuracy = 1), " of genes; ",
+      round(top_winner_enrichment, 2), "× vs pathway opportunity)",
+      "\nTop2 share: ", scales::percent(top2_winner_share, accuracy = 1),
+      "; Effective winners: ", round(effective_n_winners, 1)
+    )
+  )
+
+winner_eq_per_gene <- winner_eq_per_gene %>%
+  left_join(
+    pathway_panel_labels %>% select(pathway_label, pathway_panel),
+    by = "pathway_label"
+  )
+
+gene_levels <- winner_eq_per_gene %>%
+  group_by(pathway_label) %>%
+  arrange(prop_obs, .by_group = TRUE) %>%
+  ungroup() %>%
+  pull(gene_pathway)
+
+winner_eq_per_gene <- winner_eq_per_gene %>%
+  mutate(
+    gene_pathway = factor(gene_pathway, levels = unique(gene_levels)),
+    pathway_panel = factor(pathway_panel, levels = unique(pathway_panel_labels$pathway_panel))
+  )
+
+#this removes eq label next to q value
+
+# winner_eq_per_gene <- winner_eq_per_gene %>%
+#   mutate(
+#     label = if_else(
+#       !is.na(min_q_group) & min_q_group < 0.05,
+#       paste0("q=", signif(min_q_group, 2)),
+#       ""
+#     )
+#   )
+
+# remove q scores
+
+winner_eq_per_gene <- winner_eq_per_gene %>%
+  mutate(
+    label = eq_group  
+  )
+ 
+#reorder labels
+
+winner_eq_per_gene$pathway_label <- factor(winner_eq_per_gene$pathway_label, levels = category_orderb)
+
+
+#title
+
+    # title = paste0(
+    #   "B. Winning EQ group for each top-branch gene within each pathway",
+    #   " (genes containing a top ", TOP_N_PER_PATH, " capped-ω positive branch)"
+    # )
+
+
+
+p2 <- ggplot(
+  winner_eq_per_gene,
+  aes(x = prop_obs, y = gene_pathway, color = eq_group, size = n_pos_branches)
+) +
+  geom_segment(
+    aes(x = 0, xend = prop_obs, yend = gene_pathway),
+    color = "grey70",
+    linewidth = 0.4
+  ) +
+  geom_point() +
+  geom_text(
+    aes(label = label),
+    size = 2.9,
+    color = "#3C3C3C",
+    hjust= - 0.13,
+    fontface = "bold"
+  ) +
+  facet_grid(pathway_label ~ ., scales = "free_y", space = "free_y") +
+  scale_y_discrete(labels = function(x) sub("^.*___", "", x)) +
+  coord_cartesian(clip = "off") +
+      scale_color_manual(values = EQ_pallette) +
+  labs(
+    x = "Winning share of positive branches within gene",
+    y = "Gene",
+    color = "Winning EQ group",
+    size = "Positive\nbranches",
+    # title = paste0(
+    #   "B. Winning EQ group for each top-branch gene within each pathway",
+    #   " (genes containing a top ", TOP_N_PER_PATH, " capped-ω positive branch)"
+    # )
+  ) +
+  theme_bw() +
+  scale_x_continuous(
+  limits = c(0, max(winner_eq_per_gene$prop_obs) * 1.25),
+  expand = expansion(mult = c(0, 0.02))
+) +
+    #remove the color legend 
+  guides(color = "none") +
+  theme(
+    strip.text.y = element_text(size = 8),
+    axis.text.y = element_text(size = 8),
+    panel.spacing.y = unit(0.45, "lines"),
+    plot.margin = margin(5.5, 140, 5.5, 5.5),
+    legend.position = "right"
+  )
+
+p2 <- p2 +
+ theme_bold_large
+
+ggsave("Fig4.G.P1_EQ.tiff", plot = p1, height = 8, width = 12)
+ggsave("Fig4.H.P2_EQ.tiff", plot = p2, height = 8, width = 12)
+
+p1 / p2 + plot_layout(heights = c(1, 2))
+
+pathway_panel_labels
+
+
+# SUMMARY TABLE 
+
+# plain-text quick-read version of the facet summaries
+panel_B_summary_text <- pathway_panel_labels %>%
+  arrange(pathway_label) %>%
+  transmute(
+    line = paste0(
+      pathway_label, ": ",
+      "Top winner = ", top_winner,
+      " (", scales::percent(top_winner_share, accuracy = 1), " of genes; ",
+      round(top_winner_enrichment, 2), "\u00D7 vs pathway opportunity); ",
+      "Top2 share = ", scales::percent(top2_winner_share, accuracy = 1), "; ",
+      "Effective winners = ", round(effective_n_winners, 1)
+    )
+  ) %>%
+  pull(line) %>%
+  paste(collapse = "\n")
+
+
+
+panel_B_summary_text <- pathway_panel_labels %>%
+  arrange(pathway_label) %>%
+  transmute(
+    line = paste0(
+      pathway_label, ": ",
+      "Top winner = ", top_winner,
+      " (", scales::percent(top_winner_share, accuracy = 1), " of genes; ",
+      round(top_winner_enrichment, 2), "\u00D7 vs Functional Category opportunity); ",
+      "Top2 share = ", scales::percent(top2_winner_share, accuracy = 1), "; ",
+      "Effective winners = ", round(effective_n_winners, 1)
+    )
+  ) %>%
+  pull(line) %>%
+  paste(collapse = "\n")
+
+
+summary_text_plot <- patchwork::wrap_elements(
+  grid::textGrob(
+    panel_B_summary_text,
+    x = 0, hjust = 0,
+    y = 1, vjust = 1,
+    gp = grid::gpar(fontsize = 9)
+  )
+)
+
+summary_text_plot
+ 
+writeLines(panel_B_summary_text, "panel_B_summaryEQ.txt", useBytes = TRUE)
+
+ggplot2::ggsave(
+  filename = "panel_B_summary_plot_EQ.png",
+  plot = summary_text_plot,
+  width = 9,
+  height = 1,
+  dpi = 300
+)
+
+
+
+```
+
+#Primate groupings table
+```{r}
+
+species_metadata <- bind_rows(
+  tibble(
+    category_type = "EQ group",
+    category_name = "EQlow",
+    species_involved = list(EQlow)
+  ),
+  tibble(
+    category_type = "EQ group",
+    category_name = "EQmed",
+    species_involved = list(EQmed)
+  ),
+  tibble(
+    category_type = "EQ group",
+    category_name = "EQhigh",
+    species_involved = list(EQhigh)
+  ),
+  tibble(
+    category_type = "Diet group",
+    category_name = "Omnivore",
+    species_involved = list(omni_species)
+  ),
+  tibble(
+    category_type = "Diet group",
+    category_name = "Folivore",
+    species_involved = list(foli_species)
+  ),
+  tibble(
+    category_type = "Diet group",
+    category_name = "Frugivore",
+    species_involved = list(frugi_species)
+  ),
+  tibble(
+    category_type = "Diet group",
+    category_name = "Carnivore",
+    species_involved = list(carni_species)
+  ),
+  tibble(
+    category_type = "Clade",
+    category_name = "Hominoidea",
+    species_involved = list(toupper(hominoidea))
+  ),
+  tibble(
+    category_type = "Clade",
+    category_name = "Cercopithecoidea",
+    species_involved = list(toupper(cercopithecoidea))
+  ),
+  tibble(
+    category_type = "Clade",
+    category_name = "Platyrrhini",
+    species_involved = list(toupper(platyrrhini))
+  ),
+  tibble(
+    category_type = "Clade",
+    category_name = "Strepsirrhini",
+    species_involved = list(toupper(strepsirrhini))
+  ),
+  tibble(
+    category_type = "Clade",
+    category_name = "Tarsiiformes",
+    species_involved = list(toupper(tarsiiformes))
+  )
+)
+
+category_table <- tibble(
+  category_type   = c(
+    rep("EQ group", 3),
+    rep("Diet group", 4),
+    rep("Clade", 5)
+  ),
+  category_name   = c(
+    "EQlow", "EQmed", "EQhigh",
+    "Omnivore", "Folivore", "Frugivore", "Carnivore",
+    "Hominoidea", "Cercopithecoidea", "Platyrrhini",
+    "Strepsirrhini", "Tarsiiformes"
+  ),
+  species_involved = list(
+    EQlow, EQmed, EQhigh,
+    omni_species, foli_species, frugi_species, carni_species,
+    hominoidea, cercopithecoidea, platyrrhini,
+    strepsirrhini, tarsiiformes
+  )
+)
+
+species_metadata <- category_table %>%
+  mutate(species_involved = sapply(species_involved, paste, collapse = ", "))
+
+species_metadata <- species_metadata %>%
+  mutate(species_involved = toupper(species_involved))
+
+
+write.csv(species_metadata,
+          file = "species_metadata_table.csv",
+          row.names = FALSE)
+
+```
+
+
+#Fullprimategenetable
+```{r}
+
+one2one <- read.csv("manifest_tagged.csv")#%>%
+ # mutate(gene = toupper(gene))   # ensure matching
+
+
+library(tidyverse)
+library(stringr)
+
+
+
+absrel_res <- read.csv("tabsrel_summary.csv")
+
+absrel_res <- absrel_res %>%
+  extract(
+    col = gene_id,
+    into = c("gene_id", "partition"),
+    regex = "^(.*)(part.*)$",
+    remove = FALSE
+  )
+
+function_metadata <- read_csv("gene_sets_union.csv")
+
+absrel_res <- merge(
+  absrel_res,
+  function_metadata,
+  by.x = "gene_id",
+  by.y = "symbol",
+  all.x = TRUE
+)
+
+absrel_res <- absrel_res %>%
+  filter(!str_detect(branch_id, "NODE"))
+
+gene_length <- read_tsv("gene_lengths.tsv") %>%
+  mutate(gene_id = str_to_upper(gene_id))
+
+absrel_res <- merge(
+  absrel_res,
+  gene_length,
+  by.x = "branch_id",
+  by.y = "gene_id",
+  all.x = TRUE
+) %>% unique()
+
+absrel_res$species <- sub(".*_([A-Za-z]+_[A-Za-z]+)_.*", "\\1", absrel_res$branch_id)
+
+
+
+# thresholds
+
+
+PVAL_THRESH <- 0.05
+OMEGA_CAP   <- 100
+SIG_Q_THRESH <- 0.10
+BASELINE_CAP <- 100
+
+# Join ortholog (one2one)
+
+
+one2one_clean <- one2one %>%
+  mutate(gene_upper = toupper(gene))
+ 
+
+
+
+absrel_res <- absrel_res %>%
+  mutate(gene_upper = toupper(gene_id)) %>%
+  left_join(
+    one2one_clean,
+    by = "gene_upper",
+    relationship = "many-to-many"
+  ) 
+
+absrel_res <- absrel_res %>%
+  mutate(
+    species_label = toupper(species.x),
+
+    # EQ GROUP
+
+    eq_group = case_when(
+      species_label %in% EQlow  ~ "EQlow",
+      species_label %in% EQmed  ~ "EQmed",
+      species_label %in% EQhigh ~ "EQhigh",
+      TRUE ~ NA_character_
+    ),
+
+    # DIET GROUP
+
+    diet_group = case_when(
+      species_label %in% omni_species  ~ "Omnivore",
+      species_label %in% foli_species  ~ "Folivore",
+      species_label %in% frugi_species ~ "Frugivore",
+      species_label %in% carni_species ~ "Carnivore",
+      TRUE ~ NA_character_
+    ),
+
+    # CLADE GROUP
+
+    species_lower = tolower(species_label),
+    clade = case_when(
+      species_lower %in% hominoidea       ~ "Hominoidea",
+      species_lower %in% cercopithecoidea ~ "Cercopithecoidea",
+      species_lower %in% platyrrhini      ~ "Platyrrhini",
+      species_lower %in% strepsirrhini    ~ "Strepsirrhini",
+      species_lower %in% tarsiiformes     ~ "Tarsiiformes",
+      TRUE ~ NA_character_
+    ),
+
+    # FUNCTIONAL CATEGORY
+
+    functional_category = pathway_label
+  ) %>%
+  select(-species_lower)
+
+
+ 
+write.csv(
+  absrel_res,
+  file = "absrel_full_primategene_table.csv",
+  row.names = FALSE
+)
+
+
+
+
+```
+
+
+
+
+
+
